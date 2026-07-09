@@ -16,6 +16,7 @@ def test_agent_state_has_expected_keys():
         'messages',
         'retrieved_chunks',
         'tool_calls',
+        'search_unavailable',
     }
 
 
@@ -41,6 +42,7 @@ async def test_messages_accumulate_via_add_messages_reducer():
             'messages': [HumanMessage(content='Привет')],
             'retrieved_chunks': [],
             'tool_calls': [],
+            'search_unavailable': False,
         },
         config=config,
     )
@@ -51,6 +53,7 @@ async def test_messages_accumulate_via_add_messages_reducer():
             'messages': [HumanMessage(content='Второй вопрос')],
             'retrieved_chunks': [],
             'tool_calls': [],
+            'search_unavailable': False,
         },
         config=config,
     )
@@ -74,6 +77,7 @@ async def test_messages_do_not_leak_between_sessions():
             'messages': [HumanMessage(content='Вопрос в сессии A')],
             'retrieved_chunks': [],
             'tool_calls': [],
+            'search_unavailable': False,
         },
         config={'configurable': {'thread_id': 'session-a'}},
     )
@@ -84,6 +88,7 @@ async def test_messages_do_not_leak_between_sessions():
             'messages': [HumanMessage(content='Вопрос в сессии B')],
             'retrieved_chunks': [],
             'tool_calls': [],
+            'search_unavailable': False,
         },
         config={'configurable': {'thread_id': 'session-b'}},
     )
