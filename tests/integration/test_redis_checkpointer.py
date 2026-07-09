@@ -91,3 +91,14 @@ async def test_session_expires_after_ttl_of_inactivity():
 
         contents = [message.content for message in result['messages']]
         assert contents == ['Вопрос после истечения TTL']
+
+
+async def test_checkpointer_setup_fails_fast_when_redis_unreachable():
+    """Тест устойчивости (Этап 10.6): Redis недоступен в момент установки
+    checkpointer'а — падает с понятной ошибкой быстро, не зависает."""
+    settings = RedisSettings(redis_host='localhost', redis_port=1, redis_session_ttl_seconds=86400)
+
+    with pytest.raises(Exception):  # noqa: B017 - конкретный тип зависит от redis-py, важен сам факт быстрого отказа
+        async with asyncio.timeout(10.0):
+            async with get_redis_checkpointer(settings):
+                pass

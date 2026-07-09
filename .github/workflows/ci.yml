@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.13-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: ci-password
+          RABBITMQ_DEFAULT_VHOST: /
+        ports:
+          - 5672:5672
+      redis:
+        # redis-stack-server, не обычный redis — langgraph-checkpoint-redis
+        # (Этап 5) требует RediSearch. См. app/checkpoint/redis_saver.py.
+        image: redis/redis-stack-server:7.4.0-v6
+        ports:
+          - 6379:6379
+
+    env:
+      RABBITMQ_HOST: localhost
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: guest
+      RABBITMQ_PASSWORD: ci-password
+      RABBITMQ_VHOST: /
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      # LLM/MCP не поднимаются в CI (MCP Tools Server ещё не существует,
+      # AGENT_SERVICE_PLAN.md раздел 0) — значения только чтобы Settings()
+      # сконструировался при импорте, реальных вызовов unit/integration
+      # тесты не делают (LLM/MCP замоканы — httpx.MockTransport/мок FastMCP
+      # сервер, поднимаемый самими тестами на свободном порту).
+      LLM_API_KEY: ci-llm-api-key
+      LLM_API_URL: http://localhost:9/v1/chat/completions
+      LLM_MODEL: ci-test-model
+      MCP_SERVER_URL: http://localhost:9/mcp/sse
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Установка зависимостей
+        run: pip install -r requirements-dev.txt
+
+      - name: Линтер (ruff)
+        run: ruff check .
+
+      - name: Тесты (unit + integration)
+        run: pytest tests/ -v
