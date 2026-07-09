@@ -4,8 +4,15 @@ MCP Tools Server как отдельный сервис пока не сущес
 AGENT_SERVICE_PLAN.md, раздел 0 — отдельный трек). Этот модуль поднимает
 минимальный, но настоящий (не замоканный на уровне HTTP-транспорта) сервер
 с единственным тулом `kb_search`, чтобы `app/clients/mcp_client.py` можно
-было реализовать и протестировать против реального MCP-протокола (SSE)
-уже сейчас — контракт зафиксирован в разделе 3.3 плана.
+было реализовать и протестировать против реального MCP-протокола
+(streamable-http) уже сейчас — контракт зафиксирован в разделе 3.3 плана.
+
+Транспорт — streamable-http, не SSE (решение зафиксировано в
+`vera_mcp_service/MCP_SERVICE_PLAN.md`, раздел 0.1/0.2, 2026-07-09) —
+синхронизировано с реальным MCP Tools Server, который строится на том же
+транспорте. `FastMCP.streamable_http_app()` — самостоятельное ASGI-приложение
+с маршрутом уже на `/mcp` (не требует обёртки в FastAPI/дополнительного
+`app.mount()`, в отличие от прежней SSE-версии этого файла).
 """
 
 import asyncio
@@ -14,9 +21,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 from sse_starlette.sse import AppStatus
+from starlette.applications import Starlette
 
 
 def create_mock_mcp_app(
@@ -24,7 +31,7 @@ def create_mock_mcp_app(
     *,
     fail_message: str | None = None,
     delay_seconds: float = 0.0,
-) -> FastAPI:
+) -> Starlette:
     """Создаёт ASGI-приложение мок-сервера с тулом `kb_search`.
 
     Args:
@@ -37,8 +44,7 @@ def create_mock_mcp_app(
         delay_seconds: задержка перед ответом — имитация медленного
             RAG Service, для тестов таймаута на стороне клиента.
     """
-    app = FastAPI()
-    mcp = FastMCP('vera-tools-mock')
+    mcp = FastMCP('vera-tools-mock', stateless_http=True)
 
     @mcp.tool()
     async def kb_search(query: str, audience: str = 'both') -> dict:
@@ -49,8 +55,7 @@ def create_mock_mcp_app(
             raise RuntimeError(fail_message)
         return {'chunks': chunks or []}
 
-    app.mount('/mcp', mcp.sse_app())
-    return app
+    return mcp.streamable_http_app()
 
 
 def _free_port() -> int:
@@ -60,24 +65,27 @@ def _free_port() -> int:
 
 
 @asynccontextmanager
-async def run_mock_mcp_server(app: FastAPI) -> AsyncIterator[str]:
-    """Запускает мок-сервер на свободном локальном порту и отдаёт SSE-URL.
+async def run_mock_mcp_server(app: Starlette) -> AsyncIterator[str]:
+    """Запускает мок-сервер на свободном локальном порту и отдаёт MCP-URL.
 
     Используется в интеграционных тестах `app/clients/mcp_client.py`
-    (Этап 3.5) — соединение идёт по настоящему MCP/SSE-протоколу поверх
-    HTTP, не через `httpx.MockTransport`.
+    (Этап 3.5) — соединение идёт по настоящему MCP/streamable-http протоколу
+    поверх HTTP, не через `httpx.MockTransport`.
 
-    **Находка:** `sse_starlette.sse.AppStatus.should_exit` — флаг на уровне
-    **процесса** (не отдельного сервера), которым `sse_starlette`
-    отслеживает сигнал остановки uvicorn, чтобы корректно закрывать
-    SSE-потоки. Отключение одного тестового сервера взводит этот глобальный
-    флаг и **никогда не сбрасывает** его обратно — следующий поднятый в
-    этом же процессе мок-сервер немедленно обрывает свои SSE-соединения
-    ("peer closed connection without sending complete message body"),
-    потому что общий флаг уже стоит в `True`. Проявляется только при
-    прогоне нескольких интеграционных тестов в одном pytest-процессе — по
-    отдельности каждый тест-файл проходит. Сброс флага после остановки
-    сервера полностью устраняет эффект.
+    **Находка (перепроверена для streamable-http, 2026-07-09):** та же
+    проблема с `sse_starlette.sse.AppStatus.should_exit`, что и в прежней
+    SSE-версии этого файла — только теперь актуальна не сама по себе для
+    SSE-транспорта, а потому что streamable-http-транспорт `mcp` SDK тоже
+    использует `sse_starlette.EventSourceResponse` внутри
+    (`mcp/server/streamable_http.py`) для стрима ответов сервера. Флаг —
+    процессный, не привязан к конкретному серверу: остановка одного
+    мок-сервера взводит его и никогда не сбрасывает — следующий поднятый в
+    этом же процессе сервер немедленно рвёт свои потоковые ответы
+    ("peer closed connection without sending complete message body
+    (incomplete chunked read)"), из-за чего клиент вешается на ожидании
+    ответа на `initialize`. Подтверждено эмпирически: воспроизводится в
+    прогоне из 2+ последовательных серверов в одном процессе, независимо
+    пропадает при сбросе флага в `finally`.
     """
     port = _free_port()
     config = uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning')
@@ -86,7 +94,7 @@ async def run_mock_mcp_server(app: FastAPI) -> AsyncIterator[str]:
     try:
         while not server.started:
             await asyncio.sleep(0.02)
-        yield f'http://127.0.0.1:{port}/mcp/sse'
+        yield f'http://127.0.0.1:{port}/mcp'
     finally:
         server.should_exit = True
         await server_task

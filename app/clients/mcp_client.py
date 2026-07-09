@@ -32,6 +32,12 @@ def get_mcp_client(settings: McpSettings) -> MultiServerMCPClient:
     локальной разработке подменяется мок-сервером
     (`tests/fixtures/mock_mcp_server.py`).
 
+    Транспорт — `streamable_http`, не `sse` (решение зафиксировано в
+    `vera_mcp_service/MCP_SERVICE_PLAN.md`, раздел 0.1/0.2, 2026-07-09) —
+    актуальный рекомендуемый транспорт спецификации MCP, на нём же построен
+    сам MCP Tools Server. `MCP_SERVER_URL` соответственно без `/sse`-суффикса
+    (см. `.env.example`).
+
     `handle_tool_errors=False` — ошибка выполнения тула на стороне
     MCP-сервера должна прийти как исключение, а не как текстовый
     content-блок вида `"Error executing tool ..."` — иначе
@@ -41,7 +47,7 @@ def get_mcp_client(settings: McpSettings) -> MultiServerMCPClient:
         {
             MCP_SERVER_NAME: {
                 'url': settings.mcp_server_url,
-                'transport': 'sse',
+                'transport': 'streamable_http',
                 'timeout': settings.mcp_call_timeout_seconds,
                 'sse_read_timeout': settings.mcp_call_timeout_seconds,
             }

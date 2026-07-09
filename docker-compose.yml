@@ -3,6 +3,14 @@ volumes:
   redis_data:
   phoenix_data:
 
+networks:
+  # Общая сеть для сквозной интеграции трёх сервисов (MCP_SERVICE_PLAN.md
+  # в vera_mcp_service, Этап 8). Создаётся один раз вручную:
+  # `docker network create vera_network` — не управляется этим (или любым
+  # другим) отдельным docker-compose.yml.
+  vera_network:
+    external: true
+
 services:
   rabbitmq:
     container_name: vera_agent_rabbitmq
@@ -39,9 +47,15 @@ services:
 
   phoenix:
     container_name: vera_agent_phoenix
-    # Локальный Phoenix для разработки (Этап 9, опционально — не блокирует
-    # остальные сервисы). Не публичный порт в проде — см. README RAG
-    # Service, аналогичное решение по self-hosted observability-сервисам.
+    # Локальный Phoenix для разработки (Этап 9). С Этапа 8 плана
+    # vera_mcp_service (раздел "Этап 8.3") — единственный общий инстанс
+    # Phoenix на все три сервиса, не только для agent_service: и
+    # vera_mcp_service, и (в перспективе) vera_rag_service экспортируют
+    # трейсы сюда же через `vera_network`, чтобы получить единое дерево
+    # трейса на сквозной запрос (AGENT_VERA_ARCHITECTURE.md, раздел
+    # Observability, требует именно этого). Не публичный порт в проде —
+    # см. README RAG Service, аналогичное решение по self-hosted
+    # observability-сервисам.
     image: arizephoenix/phoenix:version-17.21.0
     restart: always
     volumes:
@@ -51,6 +65,9 @@ services:
     ports:
       - "6006:6006"  # UI + OTLP/HTTP (см. PHOENIX_OTLP_ENDPOINT в .env.example)
       - "4317:4317"  # OTLP/gRPC — не используется этим сервисом (HTTP-экспортёр), порт на будущее
+    networks:
+      - default
+      - vera_network
 
   agent_service:
     container_name: vera_agent_service
@@ -66,6 +83,11 @@ services:
       RABBITMQ_HOST: rabbitmq
       REDIS_HOST: redis
       PHOENIX_OTLP_ENDPOINT: http://phoenix:6006/v1/traces
+      # Резолвится по имени контейнера в общей сети (`vera_network`), не
+      # `localhost`/`/mcp/sse` из `.env` (тот верен для локальной разработки
+      # одного репозитория, транспорт там же обновлён на streamable-http,
+      # раздел 0.2 плана MCP-сервиса) — тот же паттерн, что и RABBITMQ_HOST/REDIS_HOST выше.
+      MCP_SERVER_URL: http://vera_mcp_service:8000/mcp
     restart: on-failure
     command: bash entrypoint.sh
     # Порт хоста отличается от vera_rag_service (8000), чтобы оба сервиса
@@ -79,3 +101,6 @@ services:
     depends_on:
       - rabbitmq
       - redis
+    networks:
+      - default
+      - vera_network
