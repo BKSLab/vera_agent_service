@@ -4,7 +4,7 @@ import logging
 import random
 from typing import Any
 
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from app.core.settings import McpSettings
@@ -121,6 +121,41 @@ async def call_tool_with_retry(
         '❌ Не удалось вызвать тул %s после %d попыток. Последняя ошибка: %s', tool.name, retries, last_error
     )
     raise McpUnavailableError(str(last_error))
+
+
+def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
+    """Локальный тул с той же сигнатурой и описанием, что и удалённый
+    `kb_search` на MCP Tools Server (контракт — раздел 3.3 плана).
+
+    Нужен, чтобы `app/graph/build.py` (Этап 4) мог собрать граф и
+    вызвать `.bind_tools([kb_search_tool])` (`analyze_intent`, Этап 4.1)
+    **без сетевого обращения к MCP Tools Server** — сервиса ещё не
+    существует (раздел 0 плана), а `.bind_tools()` нужна только схема
+    аргументов, не факт доступности сервера. Реальный удалённый тул
+    резолвится лениво при **первом фактическом вызове** (не при создании
+    графа) и кешируется на весь срок жизни процесса — повторные вызовы не
+    делают лишний `get_tools()`.
+
+    Проксирование — без собственного retry: `call_kb_search` (Этап 4.2)
+    вызывает этот тул через `call_tool_with_retry`, которая уже
+    оборачивает вызов ретраями/таймаутом — дублировать эту логику здесь
+    означало бы ретраи в квадрате (N попыток снаружи × N попыток внутри).
+    """
+    resolved_tool: list[BaseTool] = []
+
+    @tool
+    async def kb_search(query: str, audience: str = 'both') -> dict:
+        """Поиск по базе знаний о правах людей с инвалидностью в сфере
+        трудоустройства и трудовой деятельности.
+
+        audience: 'seeker' | 'employer' | 'both'
+        """
+        if not resolved_tool:
+            tools = await client.get_tools()
+            resolved_tool.append(next(candidate for candidate in tools if candidate.name == 'kb_search'))
+        return await resolved_tool[0].ainvoke({'query': query, 'audience': audience})
+
+    return kb_search
 
 
 def _parse_tool_result(raw_result: Any) -> dict:

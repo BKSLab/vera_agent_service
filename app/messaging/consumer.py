@@ -86,6 +86,11 @@ class AgentRequestConsumer:
         self._queue: aio_pika.abc.AbstractQueue | None = None
         self._consumer_tag: str | None = None
 
+    @property
+    def is_connected(self) -> bool:
+        """Для `GET /health` (Этап 8) — жёсткий статус RabbitMQ."""
+        return self._connection is not None and not self._connection.is_closed
+
     async def start(self) -> None:
         """Подключается к RabbitMQ, объявляет очередь + DLQ (через
         dead-letter-exchange) и начинает потребление сообщений."""
