@@ -13,6 +13,7 @@ from app.core.config_logger import logger
 from app.core.settings import get_settings
 from app.graph.build import build_graph
 from app.messaging.consumer import AgentRequestConsumer
+from app.observability.tracing import configure_tracing
 from app.streaming.session_bus import SessionBus
 from app.streaming.sse import create_sse_router
 
@@ -30,6 +31,7 @@ session_bus = SessionBus()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    configure_tracing(settings.observability)
 
     async with AsyncExitStack() as stack:
         logger.info('🚀 Подключение к Redis (LangGraph checkpointer)...')

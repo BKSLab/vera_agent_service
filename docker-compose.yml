@@ -1,6 +1,7 @@
 volumes:
   rabbitmq_data:
   redis_data:
+  phoenix_data:
 
 services:
   rabbitmq:
@@ -35,6 +36,21 @@ services:
           # Только checkpoint'ы диалогов с TTL (AGENT_SERVICE_PLAN.md, раздел 0.1) —
           # не полноценное хранилище, небольшой лимит достаточен на старте.
           memory: 256M
+
+  phoenix:
+    container_name: vera_agent_phoenix
+    # Локальный Phoenix для разработки (Этап 9, опционально — не блокирует
+    # остальные сервисы). Не публичный порт в проде — см. README RAG
+    # Service, аналогичное решение по self-hosted observability-сервисам.
+    image: arizephoenix/phoenix:version-17.21.0
+    restart: always
+    volumes:
+      - phoenix_data:/mnt/data
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    ports:
+      - "6006:6006"  # UI + OTLP/HTTP (см. PHOENIX_OTLP_ENDPOINT в .env.example)
+      - "4317:4317"  # OTLP/gRPC — не используется этим сервисом (HTTP-экспортёр), порт на будущее
 
   agent_service:
     container_name: vera_agent_service

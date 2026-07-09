@@ -1,6 +1,6 @@
 # Agent Service — План реализации
 
-> **Статус реализации:** ✅ Этапы 0–8 (скаффолд, `AgentState`/промпт, LLM-клиент, MCP-клиент, граф LangGraph, Redis checkpointer, RabbitMQ consumer, SSE-доставка, сборка приложения) выполнены 2026-07-09. Этапы 9–12 — ⏳ Запланировано. По мере работы статус каждого этапа меняется на ✅/🔶/⏳ прямо в заголовке этапа, а под чек-листом подзадач добавляется абзац с тем, что фактически сделано и чем проверено — по образцу `vera_rag_service/RAG_SERVICE_PLAN.md`.
+> **Статус реализации:** ✅ Этапы 0–9 (скаффолд, `AgentState`/промпт, LLM-клиент, MCP-клиент, граф LangGraph, Redis checkpointer, RabbitMQ consumer, SSE-доставка, сборка приложения, Observability) выполнены 2026-07-09. Этапы 10–12 — ⏳ Запланировано. По мере работы статус каждого этапа меняется на ✅/🔶/⏳ прямо в заголовке этапа, а под чек-листом подзадач добавляется абзац с тем, что фактически сделано и чем проверено — по образцу `vera_rag_service/RAG_SERVICE_PLAN.md`.
 >
 > **Как отчитываться:** каждая подзадача — отдельный чек-бокс `- [ ]` с номером `N.M`. Отмечаем `[x]` только когда подзадача реально сделана и (если применимо) покрыта тестом. Каждый этап закрывается только при выполнении своего "Definition of Done".
 >
@@ -309,16 +309,25 @@ vera_agent_service/
 
 ---
 
-### Этап 9 — Observability (OpenTelemetry → Phoenix) ⏳ Запланировано
+### Этап 9 — Observability (OpenTelemetry → Phoenix) ✅ Выполнено (2026-07-09)
 
-- [ ] 9.1 `app/observability/tracing.py` — инициализация `openinference-instrumentation-langchain` + OTLP-экспортёр на `PHOENIX_OTLP_ENDPOINT`
-- [ ] 9.2 Ручные spans на границах, которые не покрывает автоинструментация LangChain: `rabbitmq.consume` (время в очереди), `mcp.tool_call` (этап 3), `sse.deliver`
-- [ ] 9.3 Локальный Phoenix для разработки (сервис в `docker-compose.yml`, опционально — не блокирует остальные этапы)
-- [ ] 9.4 Проверка вручную: дерево спанов одного тестового запроса совпадает по форме с деревом из `AGENT_VERA_ARCHITECTURE.md`, раздел "Что трейсим"
+- [x] 9.1 `app/observability/tracing.py` — инициализация `openinference-instrumentation-langchain` + OTLP-экспортёр на `PHOENIX_OTLP_ENDPOINT`
+- [x] 9.2 Ручные spans на границах, которые не покрывает автоинструментация LangChain: `rabbitmq.consume` (время в очереди), `mcp.tool_call` (этап 3), `sse.deliver`
+- [x] 9.3 Локальный Phoenix для разработки (сервис в `docker-compose.yml`, опционально — не блокирует остальные этапы)
+- [x] 9.4 Проверка вручную: дерево спанов одного тестового запроса совпадает по форме с деревом из `AGENT_VERA_ARCHITECTURE.md`, раздел "Что трейсим"
 
 **Definition of Done:** тестовый запрос через полный локальный контур (RabbitMQ → граф на моках MCP → SSE) виден в Phoenix единым деревом спанов с латентностью по каждому узлу.
 
 **Ссылки:** `AGENT_VERA_ARCHITECTURE.md`, раздел "Observability — логирование и оценка агента".
+
+**Фактически сделано, с реальной проверкой в живом Phoenix и одной важной находкой:**
+
+- `docker-compose.yml` — сервис `phoenix` (`arizephoenix/phoenix:version-17.21.0`, пинned-тег подтверждён реальным `docker pull`), порты `6006` (UI + OTLP/HTTP — совпадает с `PHOENIX_OTLP_ENDPOINT` из `.env.example`, зафиксированным ещё в Этапе 0) и `4317` (OTLP/gRPC, не используется этим сервисом — HTTP-экспортёр, порт на будущее). Не в `depends_on` у `agent_service` — мягкая зависимость, как и MCP (раздел 0.1).
+- `LangChainInstrumentor` автоматически инструментирует **все** вызовы LangChain/LangGraph в процессе (chat-модель, узлы графа) — в узлах `app/graph/nodes/*` вручную ничего не добавлялось. Ручные spans (`rabbitmq.consume`, `mcp.tool_call`, `sse.deliver`) добавлены как тонкие обёртки вокруг уже существующих методов (`_handle_message`/`_handle_message_body`, `call_tool_with_retry`/`_call_tool_with_retry_body`, `publish`/`_publish_body`) — не потребовалось переотступать большие тела методов Этапов 3/6/7.
+- **Находка**: `opentelemetry.trace.set_tracer_provider()` можно успешно вызвать **только один раз за процесс** — повторные вызовы молча игнорируются самим SDK (`"Overriding of current TracerProvider is not allowed"` в логе). Первая версия `reset_for_tests()`, вызываемая в каждом тесте с новым `InMemorySpanExporter`, из-за этого не работала — 2 из 3 тестов проверяли пустой (чужой) экспортёр. Исправлено: `reset_for_tests()` настраивает провайдер **один раз на модуль теста** (module-level вызов в `tests/unit/observability/test_tracing.py`), между тестами — только `exporter.clear()`. Задокументировано прямо в docstring `reset_for_tests`, чтобы не наступить повторно в будущих тестах.
+- **Реальная проверка дерева спанов** (Этап 9.4) выполнена вручную отдельным процессом (не pytest — там уже занят глобальный провайдер под `InMemorySpanExporter`) против живого Phoenix из `docker-compose.yml`: собран тестовый span-tree `agent.request → rabbitmq.consume → {mcp.tool_call, sse.deliver}` и отправлен через реальный `configure_tracing()`. Через GraphQL API Phoenix (`POST /graphql`) подтверждено: `traceCount: 1`, дерево спанов с правильными `parentId` — форма совпадает с деревом в `AGENT_VERA_ARCHITECTURE.md`, раздел "Что трейсим" (без `llm.plan`/`llm.generate` — они появятся автоматически от `LangChainInstrumentor` только при реальном прогоне через граф с настоящим вызовом LLM, не в этой точечной ручной проверке).
+
+Тесты (`tests/unit/observability/test_tracing.py`) — 3 теста подтверждают, что каждый из трёх ручных spans действительно создаётся при вызове соответствующего кода (`call_tool_with_retry`, `SessionBus.publish`, `AgentRequestConsumer._handle_message`) с ожидаемым именем. 80/80 тестов проекта зелёные стабильно (дважды подряд полным прогоном), `ruff check .` чист.
 
 ---
 

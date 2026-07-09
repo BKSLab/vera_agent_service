@@ -9,8 +9,10 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
+from app.observability.tracing import get_tracer
 
 logger = logging.getLogger('vera_agent_service')
+tracer = get_tracer()
 
 DEFAULT_RETRY_DELAY: float = 0.5
 DEFAULT_MAX_RETRY_DELAY: float = 5.0
@@ -102,6 +104,16 @@ async def call_tool_with_retry(
             ошибка выполнения тула на MCP-сервере или неожиданный формат
             ответа (раздел 0.1: для вызывающего кода все три равнозначны).
     """
+    with tracer.start_as_current_span('mcp.tool_call', attributes={'mcp.tool_name': tool.name}):
+        return await _call_tool_with_retry_body(tool, arguments, retries, timeout_seconds)
+
+
+async def _call_tool_with_retry_body(
+    tool: BaseTool,
+    arguments: dict,
+    retries: int,
+    timeout_seconds: float,
+) -> dict:
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         try:

@@ -10,8 +10,10 @@ from pydantic import ValidationError
 
 from app.exceptions.messaging import InvalidAgentRequestError
 from app.messaging.schemas import AgentRequestMessage
+from app.observability.tracing import get_tracer
 
 logger = logging.getLogger('vera_agent_service')
+tracer = get_tracer()
 
 DEFAULT_RETRIES: int = 3
 DEFAULT_RETRY_DELAY: float = 1.0
@@ -120,6 +122,13 @@ class AgentRequestConsumer:
         logger.info('✅ Consumer очереди %s остановлен', self._queue_name)
 
     async def _handle_message(self, message: aio_pika.abc.AbstractIncomingMessage) -> None:
+        """Span `rabbitmq.consume` — время обработки сообщения от получения
+        до `ack`/`nack` (Этап 9). Обёртка вокруг `_handle_message_body`,
+        чтобы не переотступать большое тело метода целиком."""
+        with tracer.start_as_current_span('rabbitmq.consume'):
+            await self._handle_message_body(message)
+
+    async def _handle_message_body(self, message: aio_pika.abc.AbstractIncomingMessage) -> None:
         try:
             payload = _parse_payload(message.body)
         except InvalidAgentRequestError as error:
