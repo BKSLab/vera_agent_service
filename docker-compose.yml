@@ -56,6 +56,16 @@ services:
     container_name: vera_agent_service
     build: .
     env_file: .env
+    # Находка Этапа 11: .env содержит RABBITMQ_HOST/REDIS_HOST=localhost —
+    # верно для локальной разработки на хосте (тесты/ручной запуск подключаются
+    # к портам, опубликованным наружу), но НЕ для этого контейнера — внутри
+    # docker-сети "localhost" означает сам контейнер agent_service, а не
+    # соседние rabbitmq/redis. environment ниже переопределяет env_file
+    # (Compose отдаёт приоритет environment) именами сервисов Compose.
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      REDIS_HOST: redis
+      PHOENIX_OTLP_ENDPOINT: http://phoenix:6006/v1/traces
     restart: on-failure
     command: bash entrypoint.sh
     # Порт хоста отличается от vera_rag_service (8000), чтобы оба сервиса
