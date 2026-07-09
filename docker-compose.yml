@@ -1,0 +1,52 @@
+volumes:
+  rabbitmq_data:
+  redis_data:
+
+services:
+  rabbitmq:
+    container_name: vera_agent_rabbitmq
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
+    env_file: .env
+    restart: always
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # management UI — http://localhost:15672
+
+  redis:
+    container_name: vera_agent_redis
+    image: redis:7.4-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          # Только checkpoint'ы диалогов с TTL (AGENT_SERVICE_PLAN.md, раздел 0.1) —
+          # не полноценное хранилище, небольшой лимит достаточен на старте.
+          memory: 256M
+
+  agent_service:
+    container_name: vera_agent_service
+    build: .
+    env_file: .env
+    restart: on-failure
+    command: bash entrypoint.sh
+    # Порт хоста отличается от vera_rag_service (8000), чтобы оба сервиса
+    # могли работать локально одновременно без конфликта портов.
+    ports:
+      - "8010:8000"
+    deploy:
+      resources:
+        limits:
+          memory: 1GB
+    depends_on:
+      - rabbitmq
+      - redis

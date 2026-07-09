@@ -1,0 +1,24 @@
+fastapi==0.139.0
+hypercorn==0.18.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+
+httpx==0.28.1
+
+# Оркестрация диалога (AGENT_VERA_ARCHITECTURE.md, AGENT_SERVICE_PLAN.md)
+langgraph==1.2.8
+langgraph-checkpoint-redis==0.5.0
+langchain-core==1.4.9
+langchain-openai==1.3.4
+langchain-mcp-adapters==0.3.0
+
+# Очередь и checkpointer
+aio-pika==9.6.2
+# 7.4.1, не 8.x — langgraph-checkpoint-redis тянет redisvl, который требует redis<8.0
+redis==7.4.1
+
+# Observability — OpenTelemetry/openinference → Arize Phoenix (Этап 9)
+opentelemetry-api==1.43.0
+opentelemetry-sdk==1.43.0
+opentelemetry-exporter-otlp-proto-http==1.43.0
+openinference-instrumentation-langchain==0.1.67

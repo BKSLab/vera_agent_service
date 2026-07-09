@@ -1,6 +1,6 @@
 # Agent Service — План реализации
 
-> **Статус реализации:** ничего не реализовано, репозиторий — каркас (только документация и инфраструктурные файлы, скопированные из `vera_rag_service` и ещё не адаптированные). Все этапы ниже — ⏳ Запланировано. По мере работы статус каждого этапа меняется на ✅/🔶/⏳ прямо в заголовке этапа, а под чек-листом подзадач добавляется абзац с тем, что фактически сделано и чем проверено — по образцу `vera_rag_service/RAG_SERVICE_PLAN.md`.
+> **Статус реализации:** ✅ Этап 0 (скаффолд) выполнен 2026-07-09. Этапы 1–12 — ⏳ Запланировано. По мере работы статус каждого этапа меняется на ✅/🔶/⏳ прямо в заголовке этапа, а под чек-листом подзадач добавляется абзац с тем, что фактически сделано и чем проверено — по образцу `vera_rag_service/RAG_SERVICE_PLAN.md`.
 >
 > **Как отчитываться:** каждая подзадача — отдельный чек-бокс `- [ ]` с номером `N.M`. Отмечаем `[x]` только когда подзадача реально сделана и (если применимо) покрыта тестом. Каждый этап закрывается только при выполнении своего "Definition of Done".
 >
@@ -121,22 +121,24 @@ vera_agent_service/
 
 ## 2. Этапы реализации
 
-### Этап 0 — Скаффолд проекта и адаптация инфраструктуры ⏳ Запланировано
+### Этап 0 — Скаффолд проекта и адаптация инфраструктуры ✅ Выполнено (2026-07-09)
 
 Цель: репозиторий перестаёт быть копией `vera_rag_service` и становится рабочим каркасом Agent Service.
 
-- [ ] 0.1 `core/settings.py` — Pydantic Settings, домены `AppSettings`, `RabbitMQSettings`, `RedisSettings`, `LlmSettings`, `McpSettings`, `ObservabilitySettings` (по образцу `FASTAPI_PATTERNS.md`, раздел 3)
-- [ ] 0.2 `core/config_logger.py` + `logging.ini` — адаптировать под новое имя логгера пакета
-- [ ] 0.3 `.env.example` — переписать с нуля под Agent Service (сейчас это копия `.env` RAG Service с `QDRANT_*`/`YANDEX_EMBEDDING_*`, которых здесь не должно быть); добавить `RABBITMQ_*`, `REDIS_*`, `LLM_*`, `MCP_SERVER_URL`, `PHOENIX_OTLP_ENDPOINT`
-- [ ] 0.4 `docker-compose.yml` — заменить сервисы `db`/`qdrant` на `rabbitmq` и `redis`; переименовать `vera_rag_*` контейнеры/volume в `vera_agent_*`
-- [ ] 0.5 `Dockerfile` — убрать `libpq-dev` (нет Postgres-клиента), проверить актуальность остального (non-root user, HEALTHCHECK)
-- [ ] 0.6 `entrypoint.sh` — убрать шаг `alembic upgrade head` (нет миграций), оставить запуск `hypercorn`
-- [ ] 0.7 `requirements.txt`/`requirements-dev.txt` с нуля: `fastapi`, `hypercorn`, `langgraph`, `langchain-openai`, `langchain-mcp-adapters`, `langgraph-checkpoint-redis`, `aio-pika`, `redis`, `httpx`, `pydantic-settings`, `openinference-instrumentation-langchain`, `opentelemetry-*`; dev: `pytest`, `pytest-asyncio`, `ruff`, `testcontainers`
-- [ ] 0.8 `pyproject.toml` — конфигурация `ruff`
+- [x] 0.1 `core/settings.py` — Pydantic Settings, домены `AppSettings`, `RabbitMQSettings`, `RedisSettings`, `LlmSettings`, `McpSettings`, `ObservabilitySettings` (по образцу `FASTAPI_PATTERNS.md`, раздел 3)
+- [x] 0.2 `core/config_logger.py` + `logging.ini` — адаптировать под новое имя логгера пакета
+- [x] 0.3 `.env.example` — переписать с нуля под Agent Service (сейчас это копия `.env` RAG Service с `QDRANT_*`/`YANDEX_EMBEDDING_*`, которых здесь не должно быть); добавить `RABBITMQ_*`, `REDIS_*`, `LLM_*`, `MCP_SERVER_URL`, `PHOENIX_OTLP_ENDPOINT`
+- [x] 0.4 `docker-compose.yml` — заменить сервисы `db`/`qdrant` на `rabbitmq` и `redis`; переименовать `vera_rag_*` контейнеры/volume в `vera_agent_*`
+- [x] 0.5 `Dockerfile` — убрать `libpq-dev` (нет Postgres-клиента), проверить актуальность остального (non-root user, HEALTHCHECK)
+- [x] 0.6 `entrypoint.sh` — убрать шаг `alembic upgrade head` (нет миграций), оставить запуск `hypercorn`
+- [x] 0.7 `requirements.txt`/`requirements-dev.txt` с нуля: `fastapi`, `hypercorn`, `langgraph`, `langchain-openai`, `langchain-mcp-adapters`, `langgraph-checkpoint-redis`, `aio-pika`, `redis`, `httpx`, `pydantic-settings`, `openinference-instrumentation-langchain`, `opentelemetry-*`; dev: `pytest`, `pytest-asyncio`, `ruff`, `testcontainers`
+- [x] 0.8 `pyproject.toml` — конфигурация `ruff`
 
 **Definition of Done:** `docker compose up -d rabbitmq redis` поднимается, `pip install -r requirements-dev.txt` проходит без конфликтов, `ruff check .` чист на пустом каркасе.
 
 **Ссылки:** `D:\BKS.Lab\python\my_projects\vera_rag_service\docker-compose.yml`, `entrypoint.sh`, `Dockerfile` — источник, от которого сейчас склонирована инфраструктура этого репозитория.
+
+**Фактически сделано:** версии пакетов в `requirements.txt` проверены по реальному PyPI (`pip index versions`), не придуманы — актуальны на 2026-07-09 (`langgraph==1.2.8`, `langchain-mcp-adapters==0.3.0`, `langgraph-checkpoint-redis==0.5.0` и т.д.). При установке найден и исправлен реальный конфликт зависимостей: `redis==8.0.1` несовместим с `redisvl` (транзитивная зависимость `langgraph-checkpoint-redis` требует `redis<8.0`) — зафиксирован `redis==7.4.1`. `pip install -r requirements-dev.txt` в чистом venv (`python -m venv venv`) прошёл без конфликтов, `ruff check .` чист. `Dockerfile` собран (`docker build`) успешно без `gcc`/`libpq-dev` — все зависимости чистый Python или manylinux-wheels, тестовый образ удалён после проверки. `docker compose up -d rabbitmq redis` поднимает оба контейнера, `rabbitmq-diagnostics ping` и `redis-cli ping` отвечают успешно. `HEALTHCHECK` в `Dockerfile` и путь в `entrypoint.sh`/`.env.example` приведены к `/health` без версионирования `/api/v1` (health — операционный эндпоинт, не часть версионируемого публичного контракта) и `HYPERCORN_WORKERS=1` (обязательно для in-process SSE-очереди и RabbitMQ-consumer'а, раздел 0.1 плана) соответственно.
 
 ---
 
