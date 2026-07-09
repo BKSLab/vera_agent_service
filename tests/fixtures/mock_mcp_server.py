@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from sse_starlette.sse import AppStatus
 
 
 def create_mock_mcp_app(
@@ -65,6 +66,18 @@ async def run_mock_mcp_server(app: FastAPI) -> AsyncIterator[str]:
     Используется в интеграционных тестах `app/clients/mcp_client.py`
     (Этап 3.5) — соединение идёт по настоящему MCP/SSE-протоколу поверх
     HTTP, не через `httpx.MockTransport`.
+
+    **Находка:** `sse_starlette.sse.AppStatus.should_exit` — флаг на уровне
+    **процесса** (не отдельного сервера), которым `sse_starlette`
+    отслеживает сигнал остановки uvicorn, чтобы корректно закрывать
+    SSE-потоки. Отключение одного тестового сервера взводит этот глобальный
+    флаг и **никогда не сбрасывает** его обратно — следующий поднятый в
+    этом же процессе мок-сервер немедленно обрывает свои SSE-соединения
+    ("peer closed connection without sending complete message body"),
+    потому что общий флаг уже стоит в `True`. Проявляется только при
+    прогоне нескольких интеграционных тестов в одном pytest-процессе — по
+    отдельности каждый тест-файл проходит. Сброс флага после остановки
+    сервера полностью устраняет эффект.
     """
     port = _free_port()
     config = uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning')
@@ -77,3 +90,4 @@ async def run_mock_mcp_server(app: FastAPI) -> AsyncIterator[str]:
     finally:
         server.should_exit = True
         await server_task
+        AppStatus.should_exit = False

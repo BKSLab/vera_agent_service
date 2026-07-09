@@ -20,7 +20,10 @@ services:
 
   redis:
     container_name: vera_agent_redis
-    image: redis:7.4-alpine
+    # redis-stack-server, не обычный redis — Этап 5 (langgraph-checkpoint-redis)
+    # использует RediSearch-индексы (команда FT._LIST и т.п.) для чекпоинтов,
+    # которых нет в ванильном Redis. Найдено эмпирически при реализации Этапа 5.
+    image: redis/redis-stack-server:7.4.0-v6
     restart: always
     volumes:
       - redis_data:/data
