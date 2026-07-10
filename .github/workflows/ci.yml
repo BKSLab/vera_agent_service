@@ -11,7 +11,7 @@ jobs:
 
     services:
       rabbitmq:
-        image: rabbitmq:3.13-management-alpine
+        image: rabbitmq:4.3-management-alpine
         env:
           RABBITMQ_DEFAULT_USER: guest
           RABBITMQ_DEFAULT_PASS: ci-password
@@ -21,7 +21,7 @@ jobs:
       redis:
         # redis-stack-server, не обычный redis — langgraph-checkpoint-redis
         # (Этап 5) требует RediSearch. См. app/checkpoint/redis_saver.py.
-        image: redis/redis-stack-server:7.4.0-v6
+        image: redis/redis-stack-server:7.4.0-v8
         ports:
           - 6379:6379
 

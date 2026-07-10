@@ -1,6 +1,4 @@
 volumes:
-  rabbitmq_data:
-  redis_data:
   phoenix_data:
 
 networks:
@@ -12,39 +10,6 @@ networks:
     external: true
 
 services:
-  rabbitmq:
-    container_name: vera_agent_rabbitmq
-    image: rabbitmq:3.13-management-alpine
-    environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
-      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST}
-    env_file: .env
-    restart: always
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"  # management UI — http://localhost:15672
-
-  redis:
-    container_name: vera_agent_redis
-    # redis-stack-server, не обычный redis — Этап 5 (langgraph-checkpoint-redis)
-    # использует RediSearch-индексы (команда FT._LIST и т.п.) для чекпоинтов,
-    # которых нет в ванильном Redis. Найдено эмпирически при реализации Этапа 5.
-    image: redis/redis-stack-server:7.4.0-v6
-    restart: always
-    volumes:
-      - redis_data:/data
-    ports:
-      - "6379:6379"
-    deploy:
-      resources:
-        limits:
-          # Только checkpoint'ы диалогов с TTL (AGENT_SERVICE_PLAN.md, раздел 0.1) —
-          # не полноценное хранилище, небольшой лимит достаточен на старте.
-          memory: 256M
-
   phoenix:
     container_name: vera_agent_phoenix
     # Локальный Phoenix для разработки (Этап 9). С Этапа 8 плана
@@ -73,20 +38,22 @@ services:
     container_name: vera_agent_service
     build: .
     env_file: .env
-    # Находка Этапа 11: .env содержит RABBITMQ_HOST/REDIS_HOST=localhost —
-    # верно для локальной разработки на хосте (тесты/ручной запуск подключаются
-    # к портам, опубликованным наружу), но НЕ для этого контейнера — внутри
-    # docker-сети "localhost" означает сам контейнер agent_service, а не
-    # соседние rabbitmq/redis. environment ниже переопределяет env_file
-    # (Compose отдаёт приоритет environment) именами сервисов Compose.
+    # RabbitMQ и Redis больше не поднимаются в этом compose — общие
+    # брокер/кеш для всех проектов живут в отдельных репозиториях
+    # rabbitmq_service_prod / redis_service_prod (см. их README.md).
+    # RABBITMQ_HOST/REDIS_HOST здесь НЕ переопределяются — значения
+    # берутся из .env (host.docker.internal для локальной разработки на
+    # этом же хосте, реальный адрес сервера в проде). extra_hosts ниже
+    # нужен, чтобы host.docker.internal резолвился и на Linux-хосте (на
+    # Docker Desktop он и так работает нативно).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      RABBITMQ_HOST: rabbitmq
-      REDIS_HOST: redis
       PHOENIX_OTLP_ENDPOINT: http://phoenix:6006/v1/traces
       # Резолвится по имени контейнера в общей сети (`vera_network`), не
       # `localhost`/`/mcp/sse` из `.env` (тот верен для локальной разработки
       # одного репозитория, транспорт там же обновлён на streamable-http,
-      # раздел 0.2 плана MCP-сервиса) — тот же паттерн, что и RABBITMQ_HOST/REDIS_HOST выше.
+      # раздел 0.2 плана MCP-сервиса).
       MCP_SERVER_URL: http://vera_mcp_service:8000/mcp
     restart: on-failure
     command: bash entrypoint.sh
@@ -98,9 +65,6 @@ services:
       resources:
         limits:
           memory: 1GB
-    depends_on:
-      - rabbitmq
-      - redis
     networks:
       - default
       - vera_network
