@@ -1,11 +1,9 @@
 """Мок MCP Tools Server для тестов и локальной разработки Agent Service.
 
-MCP Tools Server как отдельный сервис пока не существует (см.
-AGENT_SERVICE_PLAN.md, раздел 0 — отдельный трек). Этот модуль поднимает
-минимальный, но настоящий (не замоканный на уровне HTTP-транспорта) сервер
-с единственным тулом `kb_search`, чтобы `app/clients/mcp_client.py` можно
-было реализовать и протестировать против реального MCP-протокола
-(streamable-http) уже сейчас — контракт зафиксирован в разделе 3.3 плана.
+Этот модуль поднимает минимальный, но настоящий (не замоканный на уровне
+HTTP-транспорта) сервер с единственным тулом `vera_rag_kb`, чтобы
+`app/clients/mcp_client.py` можно было протестировать против реального
+MCP-протокола (streamable-http) без обращения к развёрнутому сервису.
 
 Транспорт — streamable-http, не SSE (решение зафиксировано в
 `vera_mcp_service/MCP_SERVICE_PLAN.md`, раздел 0.1/0.2, 2026-07-09) —
@@ -32,13 +30,13 @@ def create_mock_mcp_app(
     fail_message: str | None = None,
     delay_seconds: float = 0.0,
 ) -> Starlette:
-    """Создаёт ASGI-приложение мок-сервера с тулом `kb_search`.
+    """Создаёт ASGI-приложение мок-сервера с тулом `vera_rag_kb`.
 
     Args:
-        chunks: чанки, которые вернёт `kb_search` в поле `chunks` ответа
+        chunks: чанки, которые вернёт `vera_rag_kb` в поле `chunks` ответа
             (формат — как `POST /api/v1/search` в `vera_rag_service`,
             раздел 3.3 плана). Пустой список по умолчанию.
-        fail_message: если задан, `kb_search` бросает `RuntimeError` с этим
+        fail_message: если задан, `vera_rag_kb` бросает `RuntimeError` с этим
             сообщением — имитация сбоя (RAG Service/MCP Tools Server
             недоступны).
         delay_seconds: задержка перед ответом — имитация медленного
@@ -47,7 +45,7 @@ def create_mock_mcp_app(
     mcp = FastMCP('vera-tools-mock', stateless_http=True)
 
     @mcp.tool()
-    async def kb_search(query: str, audience: str = 'both') -> dict:
+    async def vera_rag_kb(query: str, audience: str = 'both') -> dict:
         """Поиск по базе знаний о правах людей с инвалидностью (мок)."""
         if delay_seconds:
             await asyncio.sleep(delay_seconds)

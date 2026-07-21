@@ -2,10 +2,7 @@ import asyncio
 import logging
 import time
 
-from app.observability.tracing import get_tracer
-
 logger = logging.getLogger('vera_agent_service')
-tracer = get_tracer()
 
 LATE_CONNECT_BUFFER_SECONDS: float = 60.0
 """Буфер для событий, опубликованных раньше, чем клиент подключился к SSE
@@ -71,12 +68,6 @@ class SessionBus:
         ещё нет (consumer начал стриминг раньше, чем клиент открыл SSE) —
         буферизует до `LATE_CONNECT_BUFFER_SECONDS`.
         """
-        with tracer.start_as_current_span(
-            'sse.deliver', attributes={'session_id': session_id, 'event.type': event.get('type', '')}
-        ):
-            await self._publish_body(session_id, event)
-
-    async def _publish_body(self, session_id: str, event: dict) -> None:
         queue = self._queues.get(session_id)
         if queue is not None:
             await queue.put(event)

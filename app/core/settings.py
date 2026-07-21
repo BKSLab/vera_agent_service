@@ -79,12 +79,11 @@ class LlmSettings(SettingsBase):
 class McpSettings(SettingsBase):
     """Настройки подключения к MCP Tools Server (Этап 3).
 
-    Сервиса пока не существует (AGENT_SERVICE_PLAN.md, раздел 0) — клиент
-    собирается против этого URL, но в тестах/локальной разработке
-    подменяется мок-сервером (раздел 0.1 плана).
+    В тестах MCP Tools Server подменяется локальным мок-сервером; в рабочем
+    окружении клиент подключается к адресу из `MCP_SERVER_URL`.
     """
 
-    mcp_server_url: str = 'http://localhost:9000/mcp/sse'
+    mcp_server_url: str = 'http://localhost:9000/mcp'
     mcp_call_timeout_seconds: float = 5.0
     mcp_call_retries: int = 2
     """Retry на уровне MCP-клиента — независим от retry-политики самого
@@ -95,7 +94,11 @@ class McpSettings(SettingsBase):
 class ObservabilitySettings(SettingsBase):
     """Настройки экспорта трейсов в Arize Phoenix (Этап 9, AGENT_SERVICE_PLAN.md)."""
 
+    phoenix_enabled: bool = True
     phoenix_otlp_endpoint: str = 'http://localhost:6006/v1/traces'
+    phoenix_project_name: str = 'vera-local'
+    phoenix_capture_content: bool = False
+    phoenix_content_max_chars: int = Field(default=12_000, ge=1)
 
 
 class Settings(BaseSettings):

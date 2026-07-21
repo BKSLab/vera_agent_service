@@ -18,7 +18,7 @@ def create_generate_with_context_node(
     chat_model: ChatOpenAI,
 ) -> Callable[[AgentState], Coroutine[Any, Any, dict]]:
     """Создаёт узел `generate_with_context` (Этап 4.3) — стримингованная
-    финальная генерация с чанками `kb_search` в контексте.
+    финальная генерация с чанками `vera_rag_kb` в контексте.
 
     Три ветки инструкции в зависимости от результата `call_kb_search`
     (раздел 0.1): есть релевантные чанки / база честно не нашла ответ /

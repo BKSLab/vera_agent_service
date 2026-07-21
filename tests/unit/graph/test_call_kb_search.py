@@ -2,10 +2,15 @@ import pytest
 
 from app.core.settings import McpSettings
 from app.graph.nodes.call_kb_search import SEARCH_UNAVAILABLE_TOOL_MESSAGE, create_call_kb_search_node
+from app.observability.request_trace import (
+    AgentRequestTraceData,
+    reset_request_trace,
+    set_request_trace,
+)
 
 
 class _FakeTool:
-    name = 'kb_search'
+    name = 'vera_rag_kb'
 
     def __init__(self, result=None, error: Exception | None = None):
         self._result = result
@@ -26,7 +31,7 @@ def _state_with_tool_call(query: str = 'квота', audience: str = 'both'):
         'messages': [
             _AIMessageStub(
                 tool_calls=[
-                    {'id': 'call_1', 'name': 'kb_search', 'args': {'query': query, 'audience': audience}}
+                    {'id': 'call_1', 'name': 'vera_rag_kb', 'args': {'query': query, 'audience': audience}}
                 ]
             )
         ],
@@ -55,43 +60,57 @@ def _no_sleep(monkeypatch):
 async def _run_node(tool: _FakeTool, retries: int = 1):
     settings = McpSettings(mcp_call_retries=retries, mcp_call_timeout_seconds=1.0)
     node = create_call_kb_search_node(tool, settings)
-    return await node(_state_with_tool_call())
+    trace_data = AgentRequestTraceData(route='knowledge_base', search_required=True)
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state_with_tool_call())
+    finally:
+        reset_request_trace(token)
+    return result, trace_data
 
 
 async def test_successful_search_updates_state_with_chunks():
     chunks = [{'chunk_id': 'c1', 'text': 'квота 2 процента'}]
     tool = _FakeTool(result=[{'type': 'text', 'text': '{"chunks": [{"chunk_id": "c1", "text": "квота 2 процента"}]}'}])
 
-    result = await _run_node(tool)
+    result, trace_data = await _run_node(tool)
 
     assert result['retrieved_chunks'] == chunks
     assert result['search_unavailable'] is False
-    assert result['tool_calls'] == ['kb_search']
+    assert result['tool_calls'] == ['vera_rag_kb']
     tool_message = result['messages'][0]
     assert tool_message.tool_call_id == 'call_1'
+    assert trace_data.tool_call_count == 1
+    assert trace_data.search_chunk_count == 1
+    assert trace_data.search_unavailable is False
 
 
 async def test_empty_chunks_is_not_treated_as_unavailable():
     """RAG честно вернул "нет ответа" — search_unavailable остаётся False."""
     tool = _FakeTool(result=[{'type': 'text', 'text': '{"chunks": []}'}])
 
-    result = await _run_node(tool)
+    result, trace_data = await _run_node(tool)
 
     assert result['retrieved_chunks'] == []
     assert result['search_unavailable'] is False
+    assert trace_data.search_chunk_count == 0
+    assert trace_data.outcome == 'unknown'
 
 
 async def test_mcp_unavailable_sets_search_unavailable_flag():
     tool = _FakeTool(error=RuntimeError('RAG Service недоступен'))
 
-    result = await _run_node(tool, retries=1)
+    result, trace_data = await _run_node(tool, retries=1)
 
     assert result['retrieved_chunks'] == []
     assert result['search_unavailable'] is True
-    assert result['tool_calls'] == ['kb_search']
+    assert result['tool_calls'] == ['vera_rag_kb']
     tool_message = result['messages'][0]
     assert tool_message.content == SEARCH_UNAVAILABLE_TOOL_MESSAGE
     assert tool_message.tool_call_id == 'call_1'
+    assert trace_data.tool_call_count == 1
+    assert trace_data.search_unavailable is True
+    assert trace_data.outcome == 'degraded'
 
 
 async def test_tool_receives_arguments_from_tool_call():

@@ -5,11 +5,16 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
+from app.observability.request_trace import (
+    AgentRequestTraceData,
+    reset_request_trace,
+    set_request_trace,
+)
 from tests.unit.graph._mock_llm import chat_model_with_handler
 
 
 @tool
-async def kb_search(query: str, audience: str = 'both') -> dict:
+async def vera_rag_kb(query: str, audience: str = 'both') -> dict:
     """Поиск по базе знаний о правах людей с инвалидностью."""
     return {'chunks': []}
 
@@ -49,7 +54,7 @@ def _tool_call_response(query: str, audience: str = 'both') -> httpx.Response:
                     'id': 'call_1',
                     'type': 'function',
                     'function': {
-                        'name': 'kb_search',
+                        'name': 'vera_rag_kb',
                         'arguments': json.dumps({'query': query, 'audience': audience}),
                     },
                 }
@@ -65,15 +70,22 @@ def _direct_response(content: str) -> httpx.Response:
 
 async def test_returns_tool_call_message_when_tool_needed():
     chat_model = chat_model_with_handler(lambda request: _tool_call_response('квота'), streaming=False)
-    node = create_analyze_intent_node(chat_model, kb_search)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb)
 
-    result = await node(_state('Какая квота на трудоустройство инвалидов?'))
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state('Какая квота на трудоустройство инвалидов?'))
+    finally:
+        reset_request_trace(token)
 
     assert 'messages' in result
     ai_message = result['messages'][0]
     assert ai_message.tool_calls
-    assert ai_message.tool_calls[0]['name'] == 'kb_search'
+    assert ai_message.tool_calls[0]['name'] == 'vera_rag_kb'
     assert ai_message.tool_calls[0]['args']['query'] == 'квота'
+    assert trace_data.route == 'knowledge_base'
+    assert trace_data.search_required is True
 
 
 async def test_returns_empty_update_when_tool_not_needed():
@@ -81,8 +93,15 @@ async def test_returns_empty_update_when_tool_not_needed():
     ответ пользователю формирует отдельный вызов generate_direct (раздел
     0.1)."""
     chat_model = chat_model_with_handler(lambda request: _direct_response('Привет! Чем могу помочь?'), streaming=False)
-    node = create_analyze_intent_node(chat_model, kb_search)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb)
 
-    result = await node(_state('привет'))
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state('привет'))
+    finally:
+        reset_request_trace(token)
 
     assert result == {}
+    assert trace_data.route == 'direct'
+    assert trace_data.search_required is False

@@ -6,10 +6,18 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 import aio_pika
 from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
+from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
+from app.core.settings import ObservabilitySettings
 from app.exceptions.messaging import InvalidAgentRequestError
 from app.messaging.schemas import AgentRequestMessage
+from app.observability.request_trace import (
+    AgentRequestTraceData,
+    reset_request_trace,
+    set_request_trace,
+)
 from app.observability.tracing import get_tracer
 
 logger = logging.getLogger('vera_agent_service')
@@ -75,6 +83,7 @@ class AgentRequestConsumer:
         token_sink: TokenSink,
         retries: int = DEFAULT_RETRIES,
         prefetch_count: int = 1,
+        observability_settings: ObservabilitySettings | None = None,
     ):
         self._connection_url = connection_url
         self._queue_name = queue_name
@@ -83,6 +92,7 @@ class AgentRequestConsumer:
         self._token_sink = token_sink
         self._retries = retries
         self._prefetch_count = prefetch_count
+        self._observability_settings = observability_settings or ObservabilitySettings()
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
         self._queue: aio_pika.abc.AbstractQueue | None = None
@@ -122,29 +132,81 @@ class AgentRequestConsumer:
         logger.info('✅ Consumer очереди %s остановлен', self._queue_name)
 
     async def _handle_message(self, message: aio_pika.abc.AbstractIncomingMessage) -> None:
-        """Span `rabbitmq.consume` — время обработки сообщения от получения
-        до `ack`/`nack` (Этап 9). Обёртка вокруг `_handle_message_body`,
-        чтобы не переотступать большое тело метода целиком."""
-        with tracer.start_as_current_span('rabbitmq.consume'):
-            await self._handle_message_body(message)
+        """Один root span охватывает обработку delivery до терминального SSE и ack/nack."""
+        trace_data = AgentRequestTraceData()
+        context_token = set_request_trace(trace_data)
+        try:
+            with tracer.start_as_current_span(
+                'vera.agent.request',
+                attributes={
+                    SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.AGENT.value,
+                    'messaging.system': 'rabbitmq',
+                    'messaging.destination.name': self._queue_name,
+                },
+            ) as span:
+                try:
+                    await self._handle_message_body(message, span, trace_data)
+                except Exception as error:
+                    trace_data.outcome = 'error'
+                    _mark_span_error(span, error)
+                    raise
+                finally:
+                    self._finalize_root_span(span, trace_data)
+        finally:
+            reset_request_trace(context_token)
 
-    async def _handle_message_body(self, message: aio_pika.abc.AbstractIncomingMessage) -> None:
+    async def _handle_message_body(
+        self,
+        message: aio_pika.abc.AbstractIncomingMessage,
+        span: Span,
+        trace_data: AgentRequestTraceData,
+    ) -> None:
         try:
             payload = _parse_payload(message.body)
         except InvalidAgentRequestError as error:
             logger.error('❌ Невалидный payload %s: %s', self._queue_name, error)
+            trace_data.outcome = 'invalid_payload'
+            _mark_span_error(span, error)
             await message.nack(requeue=False)
             return
+
+        span.set_attribute('session.id', payload.session_id)
+        span.set_attribute('user.authenticated', payload.user_id is not None)
+        span.set_attribute('agent.input.char_count', len(payload.message))
+        self._set_captured_content(
+            span,
+            SpanAttributes.INPUT_VALUE,
+            SpanAttributes.INPUT_MIME_TYPE,
+            'input.truncated',
+            payload.message,
+        )
 
         last_error: Exception | None = None
         for attempt in range(1, self._retries + 1):
             streaming_started = False
+            response_chunks: list[str] = []
+            trace_data.request_retry_count = attempt - 1
+            trace_data.streaming_started = False
+            trace_data.response_chunk_count = 0
+            trace_data.response_char_count = 0
             try:
                 async for content in self._stream_answer(payload):
-                    streaming_started = True
                     await self._token_sink(payload.session_id, {'type': 'token', 'content': content})
+                    streaming_started = True
+                    trace_data.streaming_started = True
+                    response_chunks.append(content)
+                    trace_data.response_chunk_count += 1
+                    trace_data.response_char_count += len(content)
                 await self._token_sink(payload.session_id, {'type': 'done'})
                 await message.ack()
+                trace_data.outcome = 'degraded' if trace_data.search_unavailable else 'done'
+                self._set_captured_content(
+                    span,
+                    SpanAttributes.OUTPUT_VALUE,
+                    SpanAttributes.OUTPUT_MIME_TYPE,
+                    'output.truncated',
+                    ''.join(response_chunks),
+                )
                 return
             except Exception as error:  # noqa: BLE001 - сбой графа тоже должен попасть сюда
                 last_error = error
@@ -157,7 +219,20 @@ class AgentRequestConsumer:
                         {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'},
                     )
                     await message.ack()
+                    trace_data.outcome = 'error'
+                    self._set_captured_content(
+                        span,
+                        SpanAttributes.OUTPUT_VALUE,
+                        SpanAttributes.OUTPUT_MIME_TYPE,
+                        'output.truncated',
+                        ''.join(response_chunks),
+                    )
+                    _mark_span_error(span, error)
                     return
+                span.add_event(
+                    'agent.retry',
+                    attributes={'retry.attempt': attempt, 'error.type': type(error).__name__},
+                )
                 logger.warning(
                     '⚠️ Ошибка обработки сообщения до начала стриминга (попытка %d/%d, session_id=%s): %s',
                     attempt,
@@ -178,6 +253,39 @@ class AgentRequestConsumer:
             payload.session_id, {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'}
         )
         await message.nack(requeue=False)
+        trace_data.outcome = 'dlq'
+        if last_error is not None:
+            _mark_span_error(span, last_error)
+
+    def _set_captured_content(
+        self,
+        span: Span,
+        value_attribute: str,
+        mime_type_attribute: str,
+        truncated_attribute: str,
+        content: str,
+    ) -> None:
+        if not self._observability_settings.phoenix_capture_content:
+            return
+        max_chars = self._observability_settings.phoenix_content_max_chars
+        span.set_attribute(value_attribute, content[:max_chars])
+        span.set_attribute(mime_type_attribute, 'text/plain')
+        if len(content) > max_chars:
+            span.set_attribute(truncated_attribute, True)
+
+    @staticmethod
+    def _finalize_root_span(span: Span, trace_data: AgentRequestTraceData) -> None:
+        span.set_attribute('agent.route', trace_data.route)
+        span.set_attribute('agent.search.required', trace_data.search_required)
+        span.set_attribute('agent.search.unavailable', trace_data.search_unavailable)
+        span.set_attribute('agent.search.chunk_count', trace_data.search_chunk_count)
+        span.set_attribute('agent.tool_call_count', trace_data.tool_call_count)
+        span.set_attribute('agent.retry.count', trace_data.request_retry_count)
+        span.set_attribute('agent.mcp.retry_count', trace_data.mcp_retry_count)
+        span.set_attribute('agent.response.chunk_count', trace_data.response_chunk_count)
+        span.set_attribute('agent.response.char_count', trace_data.response_char_count)
+        span.set_attribute('agent.streaming.started', trace_data.streaming_started)
+        span.set_attribute('agent.outcome', trace_data.outcome)
 
     async def _stream_answer(self, payload: AgentRequestMessage) -> AsyncIterator[str]:
         config = {'configurable': {'thread_id': payload.session_id}}
@@ -193,3 +301,9 @@ def _parse_payload(body: bytes) -> AgentRequestMessage:
         return AgentRequestMessage.model_validate_json(body)
     except ValidationError as error:
         raise InvalidAgentRequestError(str(error)) from error
+
+
+def _mark_span_error(span: Span, error: Exception) -> None:
+    span.set_attribute('error.type', type(error).__name__)
+    span.record_exception(error)
+    span.set_status(Status(StatusCode.ERROR, str(error)))

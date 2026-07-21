@@ -2,12 +2,17 @@ import asyncio
 
 import pytest
 
-from app.clients.mcp_client import _parse_tool_result, call_tool_with_retry, get_tools_with_retry
+from app.clients.mcp_client import (
+    _parse_tool_result,
+    build_kb_search_tool_proxy,
+    call_tool_with_retry,
+    get_tools_with_retry,
+)
 from app.exceptions.mcp import McpUnavailableError
 
 
 class _FakeTool:
-    name = 'kb_search'
+    name = 'vera_rag_kb'
 
     def __init__(self, results: list | None = None, exceptions: list[Exception | None] | None = None):
         self._results = results or []
@@ -37,7 +42,7 @@ class _FakeClient:
 
 
 class _HangingTool:
-    name = 'kb_search'
+    name = 'vera_rag_kb'
 
     async def ainvoke(self, arguments: dict):
         await asyncio.sleep(10)
@@ -70,6 +75,20 @@ async def test_get_tools_with_retry_raises_after_exhausting_retries():
     client = _FakeClient(exceptions=[RuntimeError('a'), RuntimeError('b')])
     with pytest.raises(McpUnavailableError):
         await get_tools_with_retry(client, retries=2, timeout_seconds=1.0)
+
+
+async def test_kb_search_proxy_uses_vera_rag_kb_public_name_and_resolves_remote_tool_once():
+    remote_tool = _FakeTool(results=[{'chunks': []}, {'chunks': []}])
+    client = _FakeClient(tools=[remote_tool])
+    proxy = build_kb_search_tool_proxy(client)
+
+    assert proxy.name == 'vera_rag_kb'
+
+    await proxy.ainvoke({'query': 'квота', 'audience': 'both'})
+    await proxy.ainvoke({'query': 'льготы', 'audience': 'seeker'})
+
+    assert client.call_count == 1
+    assert remote_tool.call_count == 2
 
 
 async def test_call_tool_with_retry_parses_text_content_block():

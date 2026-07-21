@@ -56,7 +56,7 @@ def _tool_call_completion(query: str, audience: str = 'both') -> httpx.Response:
                     'id': 'call_1',
                     'type': 'function',
                     'function': {
-                        'name': 'kb_search',
+                        'name': 'vera_rag_kb',
                         'arguments': json.dumps({'query': query, 'audience': audience}),
                     },
                 }
@@ -130,14 +130,14 @@ async def test_question_needing_kb_search_reaches_generate_with_context():
 
         assert result['retrieved_chunks'] == chunks
         assert result['search_unavailable'] is False
-        assert result['tool_calls'] == ['kb_search']
+        assert result['tool_calls'] == ['vera_rag_kb']
         final_message = result['messages'][-1]
         assert isinstance(final_message, AIMessage)
         assert final_message.content == 'Квота 2%, источник ФЗ-181.'
 
 
 async def test_greeting_goes_directly_to_generate_direct_without_mcp_call():
-    app = create_mock_mcp_app(fail_message='kb_search не должен вызываться для этого вопроса')
+    app = create_mock_mcp_app(fail_message='vera_rag_kb не должен вызываться для этого вопроса')
     async with run_mock_mcp_server(app) as url:
         mcp_settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=1)
         mcp_client = get_mcp_client(mcp_settings)

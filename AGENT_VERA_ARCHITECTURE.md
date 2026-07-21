@@ -58,7 +58,7 @@
 
 | Тул | Описание | Доступность | Итерация |
 |-----|----------|-------------|----------|
-| `kb_search(query)` | Поиск по базе знаний через RAG Service | Все пользователи | 1 |
+| `vera_rag_kb(query)` | Поиск по базе знаний через Vera RAG Service | Все пользователи | 1 |
 | `get_user_favorites(user_id)` | Избранные вакансии пользователя | Только авторизованные | 2 |
 | `search_vacancies(location, query)` | Поиск вакансий с нормализацией локации через Dadata | Только авторизованные | 2 |
 | `find_similar_vacancies(vacancy_id)` | Похожие вакансии через векторный поиск | Только авторизованные | 2 |
@@ -107,9 +107,9 @@ Agent Service (worker)
   ├── формирует контекст диалога из history[]
   ├── отправляет в LLM с описанием тулов
   │
-  │  LLM решает вызвать kb_search("квоты трудоустройство инвалидов")
+  │  LLM решает вызвать vera_rag_kb("квоты трудоустройство инвалидов")
   │
-  ├── HTTP → MCP Tools Server: { tool: "kb_search", args: { query: "..." } }
+  ├── HTTP → MCP Tools Server: { tool: "vera_rag_kb", args: { query: "..." } }
   │             │
   │             └── HTTP → RAG Service: POST /search { query, top_k }
   │                           └── векторный поиск
@@ -141,7 +141,7 @@ Agent Service (worker)
 
 ## Конверсионная логика
 
-Незалогиненный пользователь получает доступ только к `kb_search` — консультации по правам. Когда запрос требует персональных данных (избранное, поиск по локации), агент органично предлагает войти. Естественная точка регистрации без принудительных редиректов.
+Незалогиненный пользователь получает доступ только к `vera_rag_kb` — консультации по правам. Когда запрос требует персональных данных (избранное, поиск по локации), агент органично предлагает войти. Естественная точка регистрации без принудительных редиректов.
 
 ---
 
@@ -172,7 +172,7 @@ START
         │  LLM читает запрос пользователя,
         │  решает нужен ли инструмент
         │
-        ├── needs_tool: kb_search
+        ├── needs_tool: vera_rag_kb
         │     └── [node] call_kb_search
         │               │  вызов MCP Tools Server (HTTP)
         │               │  получает релевантные чанки из RAG
@@ -201,7 +201,7 @@ class AgentState(TypedDict):
     tool_calls: list[str]      # какие тулы были вызваны в этом запросе
 ```
 
-`user_id` определяет доступные тулы — незалогиненный получает только `kb_search`.
+`user_id` определяет доступные тулы — незалогиненный получает только `vera_rag_kb`.
 
 ### Инструкция агента (system prompt)
 
@@ -407,9 +407,9 @@ app.mount("/mcp", mcp.sse_app())
 ```
 
 ```python
-# tools/kb_search.py
+# tools/vera_rag_kb.py
 @mcp.tool()
-async def kb_search(query: str, audience: str = "both") -> dict:
+async def vera_rag_kb(query: str, audience: str = "both") -> dict:
     """
     Поиск по базе знаний о правах инвалидов.
     audience: 'seeker' | 'employer' | 'both'
@@ -447,7 +447,7 @@ async def find_similar_vacancies(vacancy_id: str) -> dict:
 mcp-tools-server/
 ├── main.py              ← FastAPI + FastMCP монтирование
 ├── tools/
-│   ├── kb_search.py     ← итерация 1
+│   ├── vera_rag_kb.py   ← итерация 1
 │   ├── favorites.py     ← итерация 2
 │   ├── vacancies.py     ← итерация 2
 │   └── similar.py       ← итерация 2
@@ -488,18 +488,24 @@ tools = await client.get_tools()  # LangGraph получает список ту
 
 ### Что трейсим
 
-Каждый запрос пользователя порождает span-дерево:
+Каждое принятое Agent Service сообщение порождает одно корневое дерево:
 
+```text
+vera.agent.request                 service.name=vera_agent_service
+├── LangChain/LLM spans            service.name=vera_agent_service
+└── tool.vera_rag_kb               service.name=vera_agent_service
+    └── mcp.execute.vera_rag_kb    service.name=vera_mcp_service
+        └── rag.search             service.name=vera_rag_service
 ```
-[root span] agent.request
-  ├── [span] rabbitmq.consume          ← время в очереди
-  ├── [span] llm.plan                  ← LLM решает какой тул вызвать
-  ├── [span] mcp.tool_call: kb_search  ← вызов тула
-  │     └── [span] rag.search          ← векторный поиск внутри RAG Service
-  │               ├── embed_query      ← время генерации эмбеддинга
-  │               └── vector_search    ← время поиска в Qdrant
-  └── [span] llm.generate              ← финальная генерация ответа
-```
+
+Корневой span начинается после получения RabbitMQ delivery. Он показывает время
+обработки сообщения в Agent Service, но **не время ожидания в очереди**: в текущем
+RabbitMQ-контракте нет publisher timestamp, относительно которого это ожидание
+можно было бы корректно вычислить.
+
+`rag.search` остаётся одним компактным span. Latency стадий embedding, hybrid
+search и reranker, их статусы и количества результатов записываются атрибутами;
+детальные retrieval-данные остаются в таблице `search_logs` RAG Service.
 
 ### Ключевые метрики
 
@@ -515,11 +521,11 @@ tools = await client.get_tools()  # LangGraph получает список ту
 
 Phoenix подключается через OpenTelemetry-совместимые SDK:
 
-- **Agent Service** — `openinference-instrumentation` для LLM вызовов и span-дерева
-- **RAG Service** — ручные spans для embed + search
-- **MCP Tools Server** — spans на каждый вызов тула
-
-Все три сервиса экспортируют трейсы в единый Phoenix instance через OTLP.
+- Agent Service использует `openinference-instrumentation-langchain` и ручные продуктовые границы.
+- Agent, MCP и RAG экспортируют в один project (`PHOENIX_PROJECT_NAME`), но с разными `service.name`.
+- Единый Phoenix instance/project сам по себе не объединяет spans. Один trace получается благодаря динамической передаче W3C `traceparent` на переходах Agent → MCP → RAG.
+- Текст входа/выхода допускается только на корневом Agent span при `PHOENIX_CAPTURE_CONTENT=true`. MCP и RAG не экспортируют query, промпты, тексты чанков и embedding-векторы.
+- На штатной остановке каждый процесс вызывает `force_flush`, затем завершает tracer provider.
 
 ### Self-hosted деплой
 
@@ -531,6 +537,6 @@ Phoenix запускается отдельным контейнером в Dock
 
 | Итерация | Что добавляется |
 |----------|----------------|
-| **1 (текущая)** | Agent Service + RAG Service + MCP Tools Server с `kb_search` |
+| **1 (текущая)** | Agent Service + RAG Service + MCP Tools Server с `vera_rag_kb` |
 | **2** | Тулы: `get_user_favorites`, `search_vacancies` (Dadata), `find_similar_vacancies` (pgvector) |
 | **3+** | Тулы для платформы: размещение резюме, отклики, AI-матчинг работодатель↔соискатель |

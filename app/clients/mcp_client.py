@@ -2,13 +2,19 @@ import asyncio
 import json
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from langchain_core.tools import BaseTool, tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallResult
+from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
+from opentelemetry import propagate
+from opentelemetry.trace import Status, StatusCode
 
 from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
+from app.observability.request_trace import get_request_trace
 from app.observability.tracing import get_tracer
 
 logger = logging.getLogger('vera_agent_service')
@@ -21,15 +27,27 @@ JITTER_RATIO: float = 0.1
 MCP_SERVER_NAME = 'vera-tools'
 """Имя сервера в конфигурации `MultiServerMCPClient` — единственный сервер
 на итерацию 1 (см. AGENT_SERVICE_PLAN.md, раздел 0 — MCP Tools Server один,
-инструментов пока тоже один: `kb_search`)."""
+инструментов пока тоже один: `vera_rag_kb`)."""
+
+VERA_RAG_KB_TOOL_NAME = 'vera_rag_kb'
+"""Публичное имя инструмента, опубликованного `vera_mcp_service`."""
+
+
+async def inject_trace_context(
+    request: MCPToolCallRequest,
+    handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
+) -> MCPToolCallResult:
+    """Добавляет актуальный W3C-контекст в каждый HTTP tool call."""
+    headers = dict(request.headers or {})
+    propagate.inject(headers)
+    return await handler(request.override(headers=headers))
 
 
 def get_mcp_client(settings: McpSettings) -> MultiServerMCPClient:
     """Создаёт клиент MCP Tools Server.
 
-    Сервиса пока не существует (AGENT_SERVICE_PLAN.md, раздел 0) — клиент
-    собирается против конфигурируемого `MCP_SERVER_URL`, но в тестах и
-    локальной разработке подменяется мок-сервером
+    Клиент собирается против конфигурируемого `MCP_SERVER_URL`; в тестах
+    реальный MCP Service не требуется и подменяется мок-сервером
     (`tests/fixtures/mock_mcp_server.py`).
 
     Транспорт — `streamable_http`, не `sse` (решение зафиксировано в
@@ -53,6 +71,7 @@ def get_mcp_client(settings: McpSettings) -> MultiServerMCPClient:
             }
         },
         handle_tool_errors=False,
+        tool_interceptors=[inject_trace_context],
     )
 
 
@@ -110,46 +129,73 @@ async def call_tool_with_retry(
             ошибка выполнения тула на MCP-сервере или неожиданный формат
             ответа (раздел 0.1: для вызывающего кода все три равнозначны).
     """
-    with tracer.start_as_current_span('mcp.tool_call', attributes={'mcp.tool_name': tool.name}):
-        return await _call_tool_with_retry_body(tool, arguments, retries, timeout_seconds)
+    with tracer.start_as_current_span(
+        f'tool.{tool.name}',
+        attributes={
+            SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.TOOL.value,
+            'tool.name': tool.name,
+        },
+    ) as span:
+        last_error: Exception | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                raw_result = await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout_seconds)
+                result = _parse_tool_result(raw_result)
+                chunks = result.get('chunks', [])
+                retry_count = attempt - 1
+                span.set_attribute('tool.retry.count', retry_count)
+                span.set_attribute('tool.result.chunk_count', len(chunks))
+                span.set_attribute('tool.outcome', 'ok' if chunks else 'empty')
+                trace_data = get_request_trace()
+                if trace_data is not None:
+                    trace_data.mcp_retry_count += retry_count
+                return result
+            except Exception as error:
+                last_error = error
+                logger.warning(
+                    '⚠️ Ошибка вызова тула %s (попытка %d/%d): %s',
+                    tool.name,
+                    attempt,
+                    retries,
+                    error,
+                )
+                if attempt < retries:
+                    delay = _get_backoff_delay(attempt)
+                    logger.info(
+                        '🔄 Повтор через %.1fс (следующая попытка: %d/%d)',
+                        delay,
+                        attempt + 1,
+                        retries,
+                    )
+                    await asyncio.sleep(delay)
 
-
-async def _call_tool_with_retry_body(
-    tool: BaseTool,
-    arguments: dict,
-    retries: int,
-    timeout_seconds: float,
-) -> dict:
-    last_error: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            raw_result = await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout_seconds)
-            return _parse_tool_result(raw_result)
-        except Exception as error:
-            last_error = error
-            logger.warning(
-                '⚠️ Ошибка вызова тула %s (попытка %d/%d): %s', tool.name, attempt, retries, error
-            )
-            if attempt < retries:
-                delay = _get_backoff_delay(attempt)
-                logger.info('🔄 Повтор через %.1fс (следующая попытка: %d/%d)', delay, attempt + 1, retries)
-                await asyncio.sleep(delay)
-
-    logger.error(
-        '❌ Не удалось вызвать тул %s после %d попыток. Последняя ошибка: %s', tool.name, retries, last_error
-    )
-    raise McpUnavailableError(str(last_error))
+        retry_count = max(retries - 1, 0)
+        span.set_attribute('tool.retry.count', retry_count)
+        span.set_attribute('tool.result.chunk_count', 0)
+        span.set_attribute('tool.outcome', 'unavailable')
+        trace_data = get_request_trace()
+        if trace_data is not None:
+            trace_data.mcp_retry_count += retry_count
+        unavailable_error = McpUnavailableError(str(last_error))
+        span.record_exception(unavailable_error)
+        span.set_status(Status(StatusCode.ERROR, str(unavailable_error)))
+        logger.error(
+            '❌ Не удалось вызвать тул %s после %d попыток. Последняя ошибка: %s',
+            tool.name,
+            retries,
+            last_error,
+        )
+        raise unavailable_error
 
 
 def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
     """Локальный тул с той же сигнатурой и описанием, что и удалённый
-    `kb_search` на MCP Tools Server (контракт — раздел 3.3 плана).
+    `vera_rag_kb` на MCP Tools Server (контракт — раздел 3.3 плана).
 
     Нужен, чтобы `app/graph/build.py` (Этап 4) мог собрать граф и
     вызвать `.bind_tools([kb_search_tool])` (`analyze_intent`, Этап 4.1)
-    **без сетевого обращения к MCP Tools Server** — сервиса ещё не
-    существует (раздел 0 плана), а `.bind_tools()` нужна только схема
-    аргументов, не факт доступности сервера. Реальный удалённый тул
+    **без сетевого обращения к MCP Tools Server** — `.bind_tools()` нужна
+    только схема аргументов, не факт доступности сервера. Реальный удалённый тул
     резолвится лениво при **первом фактическом вызове** (не при создании
     графа) и кешируется на весь срок жизни процесса — повторные вызовы не
     делают лишний `get_tools()`.
@@ -162,7 +208,7 @@ def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
     resolved_tool: list[BaseTool] = []
 
     @tool
-    async def kb_search(query: str, audience: str = 'both') -> dict:
+    async def vera_rag_kb(query: str, audience: str = 'both') -> dict:
         """Поиск по базе знаний о правах людей с инвалидностью в сфере
         трудоустройства и трудовой деятельности.
 
@@ -170,10 +216,10 @@ def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
         """
         if not resolved_tool:
             tools = await client.get_tools()
-            resolved_tool.append(next(candidate for candidate in tools if candidate.name == 'kb_search'))
+            resolved_tool.append(next(candidate for candidate in tools if candidate.name == VERA_RAG_KB_TOOL_NAME))
         return await resolved_tool[0].ainvoke({'query': query, 'audience': audience})
 
-    return kb_search
+    return vera_rag_kb
 
 
 def _parse_tool_result(raw_result: Any) -> dict:
@@ -182,7 +228,7 @@ def _parse_tool_result(raw_result: Any) -> dict:
     MCP-протокол возвращает результат тула как список content-блоков
     (`[{"type": "text", "text": "<json>"}]`), не сырой `dict` — проверено
     эмпирически с `langchain-mcp-adapters==0.3.0`. Ожидаемый формат
-    text-блока для `kb_search` — JSON, совпадающий по структуре с ответом
+    text-блока для `vera_rag_kb` — JSON, совпадающий по структуре с ответом
     `POST /api/v1/search` из `vera_rag_service` (раздел 3.3 плана).
     """
     if isinstance(raw_result, dict):

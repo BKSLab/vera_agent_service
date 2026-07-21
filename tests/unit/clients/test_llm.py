@@ -75,13 +75,13 @@ async def test_ainvoke_with_retry_accepts_tool_calls_without_content():
         {
             'id': 'call_1',
             'type': 'function',
-            'function': {'name': 'kb_search', 'arguments': '{"query": "квота"}'},
+            'function': {'name': 'vera_rag_kb', 'arguments': '{"query": "квота"}'},
         }
     ]
     model = _chat_model(lambda request: _completion_response('', tool_calls))
     result = await ainvoke_with_retry(model, [HumanMessage(content='квота?')])
     assert result.tool_calls
-    assert result.tool_calls[0]['name'] == 'kb_search'
+    assert result.tool_calls[0]['name'] == 'vera_rag_kb'
 
 
 async def test_ainvoke_with_retry_retries_on_network_error_then_succeeds():

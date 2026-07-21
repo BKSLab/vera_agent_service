@@ -1,12 +1,6 @@
 """Интеграционные тесты `app/clients/mcp_client.py` против настоящего
-мок-сервера (tests/fixtures/mock_mcp_server.py) — реальный MCP/SSE
-протокол поверх HTTP, не `httpx.MockTransport`.
-
-MCP Tools Server как отдельный сервис пока не существует
-(AGENT_SERVICE_PLAN.md, раздел 0) — эти тесты подтверждают, что клиент
-корректно работает с настоящим MCP-протоколом уже сейчас, готовый к
-переключению на реальный `MCP_SERVER_URL`, когда сервис появится.
-"""
+локального MCP-сервера (tests/fixtures/mock_mcp_server.py) по протоколу
+streamable-http, без обращения к развёрнутому `vera_mcp_service`."""
 
 import pytest
 
@@ -28,7 +22,7 @@ async def test_get_tools_and_call_kb_search_against_real_mock_server():
         tools = await get_tools_with_retry(
             client, retries=settings.mcp_call_retries, timeout_seconds=settings.mcp_call_timeout_seconds
         )
-        assert [tool.name for tool in tools] == ['kb_search']
+        assert [tool.name for tool in tools] == ['vera_rag_kb']
 
         result = await call_tool_with_retry(
             tools[0],
@@ -77,7 +71,7 @@ async def test_call_kb_search_raises_mcp_unavailable_on_timeout():
 
 
 async def test_get_tools_with_retry_raises_when_server_unreachable():
-    settings = McpSettings(mcp_server_url='http://127.0.0.1:1/mcp/sse', mcp_call_timeout_seconds=1.0)
+    settings = McpSettings(mcp_server_url='http://127.0.0.1:1/mcp', mcp_call_timeout_seconds=1.0)
     client = get_mcp_client(settings)
 
     with pytest.raises(McpUnavailableError):

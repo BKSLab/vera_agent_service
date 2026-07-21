@@ -33,15 +33,13 @@ jobs:
       RABBITMQ_VHOST: /
       REDIS_HOST: localhost
       REDIS_PORT: 6379
-      # LLM/MCP не поднимаются в CI (MCP Tools Server ещё не существует,
-      # AGENT_SERVICE_PLAN.md раздел 0) — значения только чтобы Settings()
-      # сконструировался при импорте, реальных вызовов unit/integration
-      # тесты не делают (LLM/MCP замоканы — httpx.MockTransport/мок FastMCP
-      # сервер, поднимаемый самими тестами на свободном порту).
+      # LLM/MCP не поднимаются в CI — значения нужны только, чтобы Settings()
+      # сконструировался при импорте. LLM замокан через httpx.MockTransport,
+      # MCP — локальным FastMCP-сервером на свободном порту.
       LLM_API_KEY: ci-llm-api-key
-      LLM_API_URL: http://localhost:9/v1/chat/completions
+      LLM_API_URL: http://localhost:9/v1
       LLM_MODEL: ci-test-model
-      MCP_SERVER_URL: http://localhost:9/mcp/sse
+      MCP_SERVER_URL: http://localhost:9/mcp
 
     steps:
       - uses: actions/checkout@v4

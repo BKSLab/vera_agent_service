@@ -13,7 +13,7 @@ def _state(retrieved_chunks, search_unavailable):
         'user_id': None,
         'messages': [HumanMessage(content='Какая квота на трудоустройство инвалидов?')],
         'retrieved_chunks': retrieved_chunks,
-        'tool_calls': ['kb_search'],
+        'tool_calls': ['vera_rag_kb'],
         'search_unavailable': search_unavailable,
     }
 

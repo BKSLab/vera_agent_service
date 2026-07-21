@@ -21,9 +21,8 @@ MCP_HEALTH_CHECK_TIMEOUT_SECONDS: float = 2.0
 class HealthStatus(BaseModel):
     """`status`/`rabbitmq`/`redis` — жёсткие: недоступность любого из них
     переводит `status` в `degraded` и код ответа в `503`. `mcp` —
-    информационное поле, не влияет ни на `status`, ни на код ответа
-    (AGENT_SERVICE_PLAN.md, Этап 8.2 — MCP Tools Server ещё не существует,
-    раздел 0, недоступность ожидаема)."""
+    информационное поле, не влияет ни на `status`, ни на код ответа:
+    недоступность MCP не мешает агенту запуститься и отвечать с деградацией."""
 
     status: str
     rabbitmq: str

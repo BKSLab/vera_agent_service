@@ -39,6 +39,8 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       PHOENIX_OTLP_ENDPOINT: http://phoenix:6006/v1/traces
+      PHOENIX_PROJECT_NAME: ${PHOENIX_PROJECT_NAME:-vera-local}
+      PHOENIX_CAPTURE_CONTENT: ${PHOENIX_CAPTURE_CONTENT:-false}
     restart: on-failure
     command: bash entrypoint.sh
     # Порт хоста отличается от vera_rag_service (8000), чтобы оба сервиса

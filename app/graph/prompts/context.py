@@ -1,5 +1,5 @@
 """Инструкции для `generate_with_context` (Этап 4.3) — три ветки в
-зависимости от результата `kb_search`, см. AGENT_SERVICE_PLAN.md, раздел
+зависимости от результата `vera_rag_kb`, см. AGENT_SERVICE_PLAN.md, раздел
 0.1 и Этап 4.3.
 """
 

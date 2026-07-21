@@ -13,7 +13,7 @@ class AgentState(TypedDict):
 
     session_id: str
     user_id: str | None
-    """None — незалогиненный пользователь (доступен только `kb_search`)."""
+    """None — незалогиненный пользователь (доступен только `vera_rag_kb`)."""
 
     messages: Annotated[list[BaseMessage], add_messages]
     """Reducer `add_messages` обязателен: новое сообщение, переданное в
@@ -23,7 +23,7 @@ class AgentState(TypedDict):
     RabbitMQ" (AGENT_SERVICE_PLAN.md, раздел 0.1, раздел 3.1)."""
 
     retrieved_chunks: list[dict]
-    """Чанки, полученные от `kb_search` (Этап 4). Пустой список — либо тул
+    """Чанки, полученные от `vera_rag_kb` (Этап 4). Пустой список — либо тул
     не вызывался, либо RAG честно вернул "нет ответа" (см. `search_unavailable`
     ниже для различия этого случая от технической недоступности поиска)."""
 
@@ -32,7 +32,7 @@ class AgentState(TypedDict):
     для наблюдаемости и детектирования зацикливания (Этап 9)."""
 
     search_unavailable: bool
-    """True, если `kb_search` не вызывался из-за недоступности MCP Tools
+    """True, если `vera_rag_kb` не вызывался из-за недоступности MCP Tools
     Server (`McpUnavailableError`, Этап 4.2) — отличает "в базе знаний нет
     ответа" (`retrieved_chunks == []`, `search_unavailable == False`) от
     "поиск сейчас технически недоступен" (оба `[]`/`True`). Узел

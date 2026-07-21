@@ -17,7 +17,7 @@ def _state(messages):
 def test_routes_to_call_kb_search_when_tool_calls_present():
     ai_message = AIMessage(
         content='',
-        tool_calls=[{'id': 'call_1', 'name': 'kb_search', 'args': {'query': 'квота'}}],
+        tool_calls=[{'id': 'call_1', 'name': 'vera_rag_kb', 'args': {'query': 'квота'}}],
     )
     state = _state([HumanMessage(content='квота?'), ai_message])
     assert route_after_analyze_intent(state) == 'call_kb_search'
