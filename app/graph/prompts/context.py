@@ -19,11 +19,24 @@ SEARCH_UNAVAILABLE_INSTRUCTION = (
 def format_chunks_instruction(chunks: list[dict]) -> str:
     """Форматирует найденные чанки в инструкцию для финальной генерации."""
     parts = []
-    for chunk in chunks:
-        title = chunk.get('source_title') or chunk.get('synthetic_title') or 'Источник'
-        parts.append(f'[{title}]\n{chunk.get("text", "")}')
+    for index, chunk in enumerate(chunks, start=1):
+        source_title = chunk.get('source_title') or 'не указано'
+        section_number = chunk.get('section_number') or 'не указано'
+        section_title = chunk.get('section_title') or 'не указано'
+        parts.append(
+            f'Чанк {index}.\n'
+            f'Название источника: {source_title}\n'
+            f'Номер статьи, пункта или раздела: {section_number}\n'
+            f'Название статьи, пункта или раздела: {section_title}\n'
+            f'Текст: {chunk.get("text", "")}'
+        )
     joined = '\n\n'.join(parts)
     return (
         'Вот чанки из базы знаний, релевантные вопросу пользователя. '
-        f'Сформируй ответ на их основе, обязательно указав источник:\n\n{joined}'
+        'Сформируй ответ только на их основе. Каждый правовой вывод, цифра, срок '
+        'или обязанность должны соответствовать одному из чанков. Обязательно '
+        'заверши ответ отдельным абзацем «Основание: ...» и перечисли в нём '
+        'только фактически использованные источники и реквизиты из приведённых '
+        'ниже полей. Не придумывай отсутствующие номера статей, частей или '
+        f'пунктов. Ответ без абзаца «Основание:» недопустим.\n\n{joined}'
     )

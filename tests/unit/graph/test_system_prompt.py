@@ -29,9 +29,20 @@ def test_prompt_forbids_inventing_facts():
 def test_sources_prompt_uses_search_results_without_hardcoded_corpus_inventory():
     lowered = SOURCES_PROMPT.lower()
     assert 'только информацию, полученную через инструмент' in lowered
-    assert 'из метаданных полученных чанков' in lowered
+    assert 'бери только из текста и метаданных полученных чанков' in lowered
     assert 'трудовой кодекс' not in lowered
     assert '181-фз' not in lowered
+
+
+def test_sources_prompt_requires_rag_grounded_legal_basis_in_every_answer():
+    lowered = SOURCES_PROMPT.lower()
+    assert 'каждый ответ, сформированный на основе данных vera_rag_kb' in lowered
+    assert 'обязательно заверши отдельным обычным абзацем' in lowered
+    assert '«основание:»' in lowered
+    assert 'ответ на основе rag без абзаца «основание:» считается неполным' in lowered
+    assert 'не восстанавливай по памяти' in lowered
+    assert 'если ответ опирается на несколько норм' in lowered
+    assert 'простыми словами не отменяет обязательное указание основания' in lowered
 
 
 def test_prompt_requires_honest_refusal_when_no_data():
