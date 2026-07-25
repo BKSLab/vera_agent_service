@@ -24,15 +24,13 @@ class _FakeTool:
         return self._result
 
 
-def _state_with_tool_call(query: str = 'квота', audience: str = 'both'):
+def _state_with_tool_call(query: str = 'квота'):
     return {
         'session_id': 's',
         'user_id': None,
         'messages': [
             _AIMessageStub(
-                tool_calls=[
-                    {'id': 'call_1', 'name': 'vera_rag_kb', 'args': {'query': query, 'audience': audience}}
-                ]
+                tool_calls=[{'id': 'call_1', 'name': 'vera_rag_kb', 'args': {'query': query}}]
             )
         ],
         'retrieved_chunks': [],
@@ -118,4 +116,4 @@ async def test_tool_receives_arguments_from_tool_call():
 
     await _run_node(tool)
 
-    assert tool.received_arguments == {'query': 'квота', 'audience': 'both'}
+    assert tool.received_arguments == {'query': 'квота'}

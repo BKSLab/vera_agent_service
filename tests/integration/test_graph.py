@@ -46,7 +46,7 @@ def _completion(message: dict, finish_reason: str) -> httpx.Response:
     )
 
 
-def _tool_call_completion(query: str, audience: str = 'both') -> httpx.Response:
+def _tool_call_completion(query: str) -> httpx.Response:
     return _completion(
         {
             'role': 'assistant',
@@ -57,7 +57,7 @@ def _tool_call_completion(query: str, audience: str = 'both') -> httpx.Response:
                     'type': 'function',
                     'function': {
                         'name': 'vera_rag_kb',
-                        'arguments': json.dumps({'query': query, 'audience': audience}),
+                        'arguments': json.dumps({'query': query}),
                     },
                 }
             ],

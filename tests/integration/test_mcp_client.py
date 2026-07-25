@@ -26,7 +26,7 @@ async def test_get_tools_and_call_kb_search_against_real_mock_server():
 
         result = await call_tool_with_retry(
             tools[0],
-            {'query': 'квота', 'audience': 'both'},
+            {'query': 'квота'},
             retries=settings.mcp_call_retries,
             timeout_seconds=settings.mcp_call_timeout_seconds,
         )

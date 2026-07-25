@@ -29,7 +29,7 @@ FastAPI/`hypercorn` · LangGraph · `langchain-openai` (LLM-провайдер �
 |---|---|---|
 | `agent.requests` (RabbitMQ) | Next.js Proxy → Agent Service | `{session_id, user_id, message}`, без истории; retry только для системных сбоев (невалидный payload, сбой до начала стриминга), DLQ `agent.requests.dlq` |
 | `GET /sse/{session_id}` | Клиент ← Agent Service | `data: {"type": "token"/"done"/"error", ...}` |
-| Тул `vera_rag_kb` (MCP) | Agent Service → MCP Tools Server | `vera_rag_kb(query: str, audience: "seeker"\|"employer"\|"both") -> {"chunks": [...]}` — формат чанков совпадает с `POST /api/v1/search` в `vera_rag_service` |
+| Тул `vera_rag_kb` (MCP) | Agent Service → MCP Tools Server | `vera_rag_kb(query: str) -> {"chunks": [...]}` — роль пользователя не передаётся в поиск; формат чанков совпадает с `POST /api/v1/search` в `vera_rag_service` |
 | `GET /health` | Оркестратор/мониторинг | `rabbitmq`/`redis` — жёсткий статус (влияет на код ответа); `mcp` — информационное поле, недоступность не даёт `503` |
 
 ## Запуск локально

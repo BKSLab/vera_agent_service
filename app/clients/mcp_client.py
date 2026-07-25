@@ -208,16 +208,17 @@ def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
     resolved_tool: list[BaseTool] = []
 
     @tool
-    async def vera_rag_kb(query: str, audience: str = 'both') -> dict:
+    async def vera_rag_kb(query: str) -> dict:
         """Поиск по базе знаний о правах людей с инвалидностью в сфере
         трудоустройства и трудовой деятельности.
 
-        audience: 'seeker' | 'employer' | 'both'
+        Передавай самодостаточный поисковый запрос: включай в него существенный
+        контекст из текущего вопроса и истории диалога.
         """
         if not resolved_tool:
             tools = await client.get_tools()
             resolved_tool.append(next(candidate for candidate in tools if candidate.name == VERA_RAG_KB_TOOL_NAME))
-        return await resolved_tool[0].ainvoke({'query': query, 'audience': audience})
+        return await resolved_tool[0].ainvoke({'query': query})
 
     return vera_rag_kb
 

@@ -18,10 +18,12 @@ class _FakeTool:
         self._results = results or []
         self._exceptions = exceptions or []
         self.call_count = 0
+        self.received_arguments: list[dict] = []
 
     async def ainvoke(self, arguments: dict):
         index = self.call_count
         self.call_count += 1
+        self.received_arguments.append(arguments)
         if index < len(self._exceptions) and self._exceptions[index] is not None:
             raise self._exceptions[index]
         return self._results[index]
@@ -84,11 +86,12 @@ async def test_kb_search_proxy_uses_vera_rag_kb_public_name_and_resolves_remote_
 
     assert proxy.name == 'vera_rag_kb'
 
-    await proxy.ainvoke({'query': 'квота', 'audience': 'both'})
-    await proxy.ainvoke({'query': 'льготы', 'audience': 'seeker'})
+    await proxy.ainvoke({'query': 'квота'})
+    await proxy.ainvoke({'query': 'льготы'})
 
     assert client.call_count == 1
     assert remote_tool.call_count == 2
+    assert remote_tool.received_arguments == [{'query': 'квота'}, {'query': 'льготы'}]
 
 
 async def test_call_tool_with_retry_parses_text_content_block():

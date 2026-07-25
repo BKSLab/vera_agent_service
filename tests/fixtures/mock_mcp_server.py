@@ -45,7 +45,7 @@ def create_mock_mcp_app(
     mcp = FastMCP('vera-tools-mock', stateless_http=True)
 
     @mcp.tool()
-    async def vera_rag_kb(query: str, audience: str = 'both') -> dict:
+    async def vera_rag_kb(query: str) -> dict:
         """Поиск по базе знаний о правах людей с инвалидностью (мок)."""
         if delay_seconds:
             await asyncio.sleep(delay_seconds)

@@ -14,7 +14,7 @@ from tests.unit.graph._mock_llm import chat_model_with_handler
 
 
 @tool
-async def vera_rag_kb(query: str, audience: str = 'both') -> dict:
+async def vera_rag_kb(query: str) -> dict:
     """Поиск по базе знаний о правах людей с инвалидностью."""
     return {'chunks': []}
 
@@ -44,7 +44,7 @@ def _completion(message: dict, finish_reason: str) -> httpx.Response:
     )
 
 
-def _tool_call_response(query: str, audience: str = 'both') -> httpx.Response:
+def _tool_call_response(query: str) -> httpx.Response:
     return _completion(
         {
             'role': 'assistant',
@@ -55,7 +55,7 @@ def _tool_call_response(query: str, audience: str = 'both') -> httpx.Response:
                     'type': 'function',
                     'function': {
                         'name': 'vera_rag_kb',
-                        'arguments': json.dumps({'query': query, 'audience': audience}),
+                        'arguments': json.dumps({'query': query}),
                     },
                 }
             ],
@@ -83,7 +83,7 @@ async def test_returns_tool_call_message_when_tool_needed():
     ai_message = result['messages'][0]
     assert ai_message.tool_calls
     assert ai_message.tool_calls[0]['name'] == 'vera_rag_kb'
-    assert ai_message.tool_calls[0]['args']['query'] == 'квота'
+    assert ai_message.tool_calls[0]['args'] == {'query': 'квота'}
     assert trace_data.route == 'knowledge_base'
     assert trace_data.search_required is True
 
