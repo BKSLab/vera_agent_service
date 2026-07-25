@@ -82,7 +82,13 @@ async def test_consumer_processes_published_message_end_to_end(unique_queue_name
             channel = await connection.channel()
             await channel.default_exchange.publish(
                 aio_pika.Message(
-                    body=json.dumps({'session_id': 'integration-session', 'message': 'Какая квота?'}).encode()
+                    body=json.dumps(
+                        {
+                            'session_id': 'integration-session',
+                            'request_id': 'integration-request',
+                            'message': 'Какая квота?',
+                        }
+                    ).encode()
                 ),
                 routing_key=queue_name,
             )
@@ -92,9 +98,9 @@ async def test_consumer_processes_published_message_end_to_end(unique_queue_name
         await consumer.stop()
 
     assert sink.calls == [
-        ('integration-session', {'type': 'token', 'content': 'Квота'}),
-        ('integration-session', {'type': 'token', 'content': ' составляет 2%.'}),
-        ('integration-session', {'type': 'done'}),
+        ('integration-request', {'type': 'token', 'content': 'Квота'}),
+        ('integration-request', {'type': 'token', 'content': ' составляет 2%.'}),
+        ('integration-request', {'type': 'done'}),
     ]
 
 

@@ -49,8 +49,22 @@ async def test_buffered_events_within_window_are_delivered(monkeypatch):
     assert queue.get_nowait() == {'type': 'token', 'content': 'вовремя'}
 
 
+async def test_expired_unsubscribed_request_buffer_is_pruned_on_next_publish(monkeypatch):
+    clock = {'now': 0.0}
+    monkeypatch.setattr('app.streaming.session_bus.time.monotonic', lambda: clock['now'])
+
+    bus = SessionBus(buffer_seconds=10.0)
+    await bus.publish('request-old', {'type': 'done'})
+
+    clock['now'] = 11.0
+    await bus.publish('request-new', {'type': 'token', 'content': 'Новый ответ'})
+
+    assert 'request-old' not in bus._buffers
+    assert 'request-new' in bus._buffers
+
+
 async def test_resubscribe_replaces_previous_queue():
-    """Одно активное соединение на session_id (раздел 0.1) — вторая
+    """Одно активное соединение на request_id (раздел 0.1) — вторая
     подписка (например вторая вкладка) замещает первую."""
     bus = SessionBus()
     first_queue = bus.subscribe('s1')
@@ -74,15 +88,27 @@ async def test_unsubscribe_is_noop_if_queue_was_already_replaced():
     assert second_queue.get_nowait() == {'type': 'token', 'content': 'жива'}
 
 
-async def test_different_sessions_do_not_share_queues():
+async def test_different_request_ids_do_not_share_queues():
     bus = SessionBus()
-    queue_a = bus.subscribe('session-a')
-    queue_b = bus.subscribe('session-b')
+    queue_a = bus.subscribe('request-a')
+    queue_b = bus.subscribe('request-b')
 
-    await bus.publish('session-a', {'type': 'token', 'content': 'A'})
-    await bus.publish('session-b', {'type': 'token', 'content': 'B'})
+    await bus.publish('request-a', {'type': 'token', 'content': 'A'})
+    await bus.publish('request-b', {'type': 'token', 'content': 'B'})
 
     assert queue_a.get_nowait() == {'type': 'token', 'content': 'A'}
     assert queue_b.get_nowait() == {'type': 'token', 'content': 'B'}
     assert queue_a.empty()
     assert queue_b.empty()
+
+
+async def test_buffered_previous_request_does_not_reach_next_request():
+    bus = SessionBus()
+    await bus.publish('request-old', {'type': 'token', 'content': 'Старый ответ'})
+    await bus.publish('request-old', {'type': 'done'})
+
+    new_queue = bus.subscribe('request-new')
+    await bus.publish('request-new', {'type': 'token', 'content': 'Новый ответ'})
+
+    assert new_queue.get_nowait() == {'type': 'token', 'content': 'Новый ответ'}
+    assert new_queue.empty()

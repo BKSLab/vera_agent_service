@@ -10,11 +10,11 @@ Agent Service — оркестратор диалога AI-консультан�
 
 ## Как это работает
 
-1. **Приём запроса** — consumer слушает очередь `agent.requests` (RabbitMQ). Payload не содержит истории диалога — только новое сообщение и `session_id` (`app/messaging/schemas.py`).
+1. **Приём запроса** — consumer слушает очередь `agent.requests` (RabbitMQ). Payload не содержит истории диалога: `session_id` адресует историю, `request_id` — доставку ответа конкретного сообщения (`app/messaging/schemas.py`).
 2. **Граф LangGraph** (`app/graph/`) — `analyze_intent` (короткий вызов LLM без стриминга: нужен ли `vera_rag_kb`) → при необходимости `call_kb_search` (внутреннее имя узла, вызывающего MCP-инструмент) → `generate_with_context`/`generate_direct` (стримингованная финальная генерация). Три ветки ответа при поиске: есть релевантные чанки / база честно не нашла ответ / поиск технически недоступен — модель не выдумывает факты ни в одном из случаев.
 3. **История диалога** — Redis (LangGraph checkpointer, `app/checkpoint/`), ключ треда — `session_id`, TTL по умолчанию 24 часа неактивности. Единственный источник истории — не дублируется в payload RabbitMQ.
 4. **MCP Tools Server** — `app/clients/mcp_client.py::build_kb_search_tool_proxy` собирает граф без сетевого обращения к нему; реальный удалённый `vera_rag_kb` резолвится лениво при первом фактическом вызове. При недоступности MCP или RAG ответы по вопросам, требующим поиска, честно сообщают о временной недоступности.
-5. **Доставка ответа** — `GET /sse/{session_id}` (`app/streaming/`), токены по мере генерации, терминальные события `done`/`error`. Один активный SSE-коннект на сессию (одна реплика сервиса — не масштабируется на несколько инстансов без перехода на Redis Pub/Sub).
+5. **Доставка ответа** — `GET /sse/{request_id}` (`app/streaming/`), токены по мере генерации, терминальные события `done`/`error`. `request_id` изолирует late-connect буфер и SSE одного сообщения от других запросов той же сессии. Одна реплика сервиса по-прежнему не масштабируется без перехода на Redis Pub/Sub.
 6. **Наблюдаемость** — OpenTelemetry + `openinference-instrumentation-langchain` → Arize Phoenix (`app/observability/`). Один корневой span `vera.agent.request` охватывает обработку сообщения целиком; LLM/LangGraph остаются под автоинструментацией, а вызов поиска начинается с ручного `tool.vera_rag_kb`. SSE-токены учитываются счётчиками корневого span и не создают span на каждый токен.
 
 ## Стек
@@ -27,8 +27,8 @@ FastAPI/`hypercorn` · LangGraph · `langchain-openai` (LLM-провайдер �
 
 | Контракт | Кто использует | Кратко |
 |---|---|---|
-| `agent.requests` (RabbitMQ) | Next.js Proxy → Agent Service | `{session_id, user_id, message}`, без истории; retry только для системных сбоев (невалидный payload, сбой до начала стриминга), DLQ `agent.requests.dlq` |
-| `GET /sse/{session_id}` | Клиент ← Agent Service | `data: {"type": "token"/"done"/"error", ...}` |
+| `agent.requests` (RabbitMQ) | Next.js Proxy → Agent Service | `{session_id, request_id, user_id, message}`, без истории; `request_id` обязателен, retry только для системных сбоев, DLQ `agent.requests.dlq` |
+| `GET /sse/{request_id}` | Клиент ← Agent Service | `data: {"type": "token"/"done"/"error", ...}` только для одного пользовательского запроса |
 | Тул `vera_rag_kb` (MCP) | Agent Service → MCP Tools Server | `vera_rag_kb(query: str) -> {"chunks": [...]}` — роль пользователя не передаётся в поиск; формат чанков совпадает с `POST /api/v1/search` в `vera_rag_service` |
 | `GET /health` | Оркестратор/мониторинг | `rabbitmq`/`redis` — жёсткий статус (влияет на код ответа); `mcp` — информационное поле, недоступность не даёт `503` |
 

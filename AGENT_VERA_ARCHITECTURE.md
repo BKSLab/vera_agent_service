@@ -92,19 +92,19 @@
 ```
 Клиент
   │
-  │  POST /api/v1/agent/ask  { session_id, user_id?, message }
+  │  POST /api/vera/chat  { session_id, request_id, message }
   ▼
 Next.js Proxy
   │
   │  публикует задачу в очередь
   ▼
 RabbitMQ → queue: agent.requests
-  │         payload: { session_id, user_id, message, history[] }
+  │         payload: { session_id, request_id, user_id?, message }
   │         политика: retry x3, dead-letter queue при исчерпании
   ▼
 Agent Service (worker)
   │
-  ├── формирует контекст диалога из history[]
+  ├── восстанавливает историю из Redis по session_id
   ├── отправляет в LLM с описанием тулов
   │
   │  LLM решает вызвать vera_rag_kb("квоты трудоустройство инвалидов")
@@ -128,7 +128,7 @@ Agent Service (worker)
 
 **SSE** — доставляет ответ в браузер в реальном времени (стриминг токенов).
 
-Гибрид: клиент открывает SSE-соединение с `session_id` → агент при готовности стримит токены в это соединение. RabbitMQ и SSE решают разные задачи и не конкурируют.
+Гибрид: клиент открывает SSE-соединение с уникальным `request_id` сообщения → агент при готовности стримит токены в это соединение. `session_id` отдельно адресует историю диалога. RabbitMQ и SSE решают разные задачи и не конкурируют.
 
 ### Retry policy (RabbitMQ)
 

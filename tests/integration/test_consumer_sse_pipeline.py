@@ -46,6 +46,7 @@ def _token_event(content: str) -> dict:
 async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
     settings = get_settings()
     session_id = f'pipeline-{uuid.uuid4().hex[:8]}'
+    request_id = f'request-{uuid.uuid4().hex[:8]}'
     suffix = uuid.uuid4().hex[:8]
     queue_name, dlq_name = f'agent.requests.pipeline.{suffix}', f'agent.requests.pipeline.{suffix}.dlq'
 
@@ -68,7 +69,7 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
         received: list[dict] = []
 
         async def read_sse():
-            async with http_client.stream('GET', f'/sse/{session_id}') as response:
+            async with http_client.stream('GET', f'/sse/{request_id}') as response:
                 async for line in response.aiter_lines():
                     if line.startswith('data: '):
                         received.append(json.loads(line.removeprefix('data: ')))
@@ -81,7 +82,13 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
             channel = await connection.channel()
             await channel.default_exchange.publish(
                 aio_pika.Message(
-                    body=json.dumps({'session_id': session_id, 'message': 'Какая квота?'}).encode()
+                    body=json.dumps(
+                        {
+                            'session_id': session_id,
+                            'request_id': request_id,
+                            'message': 'Какая квота?',
+                        }
+                    ).encode()
                 ),
                 routing_key=queue_name,
             )

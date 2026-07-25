@@ -139,7 +139,10 @@ def _stream_event(content: str, node: str = 'generate_direct') -> dict:
 
 
 class _FakeMessage:
-    def __init__(self, body: bytes = b'{"session_id":"s1","message":"question"}'):
+    def __init__(
+        self,
+        body: bytes = b'{"session_id":"s1","request_id":"r1","message":"question"}',
+    ):
         self.body = body
         self.acked = False
         self.nacked = False
@@ -219,10 +222,14 @@ async def test_capture_contains_only_current_message_and_truncated_final_output(
     consumer = _build_consumer(graph, capture=True, max_chars=5)
 
     await consumer._handle_message(
-        _FakeMessage(b'{"session_id":"s1","message":"question","user_id":"u1"}')
+        _FakeMessage(
+            b'{"session_id":"s1","request_id":"r1","message":"question","user_id":"u1"}'
+        )
     )
 
     span = _finished_span('vera.agent.request')
+    assert span.attributes['session.id'] == 's1'
+    assert span.attributes['request.id'] == 'r1'
     assert span.attributes['input.value'] == 'quest'
     assert span.attributes['input.mime_type'] == 'text/plain'
     assert span.attributes['input.truncated'] is True

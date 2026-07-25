@@ -26,8 +26,12 @@ class _FakeGraph:
     def __init__(self, events_per_call: list[list]):
         self._events_per_call = events_per_call
         self.call_count = 0
+        self.states: list[dict] = []
+        self.configs: list[dict] = []
 
     def astream_events(self, state, config, version='v2'):
+        self.states.append(state)
+        self.configs.append(config)
         events = self._events_per_call[self.call_count]
         self.call_count += 1
 
@@ -88,21 +92,54 @@ async def test_invalid_payload_goes_to_dlq_without_calling_graph():
     assert graph.call_count == 0
 
 
-async def test_successful_message_streams_tokens_and_acks():
-    graph = _FakeGraph([[_token_event('Квота'), _token_event(' 2%.')]])
+async def test_payload_without_request_id_goes_to_dlq_without_calling_graph():
+    graph = _FakeGraph([])
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
     message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
 
     await consumer._handle_message(message)
 
+    assert message.nacked_requeue is False
+    assert not message.acked
+    assert graph.call_count == 0
+    assert sink.calls == []
+
+
+async def test_successful_message_streams_tokens_and_acks():
+    graph = _FakeGraph([[_token_event('Квота'), _token_event(' 2%.')]])
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+
+    await consumer._handle_message(message)
+
     assert message.acked
     assert message.nacked_requeue is None
     assert sink.calls == [
-        ('s1', {'type': 'token', 'content': 'Квота'}),
-        ('s1', {'type': 'token', 'content': ' 2%.'}),
-        ('s1', {'type': 'done'}),
+        ('r1', {'type': 'token', 'content': 'Квота'}),
+        ('r1', {'type': 'token', 'content': ' 2%.'}),
+        ('r1', {'type': 'done'}),
     ]
+
+
+async def test_request_id_routes_delivery_without_changing_session_history_key():
+    graph = _FakeGraph([[_token_event('Ответ')]])
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(
+        body=b'{"session_id": "conversation-1", "request_id": "request-1", "message": "?"}'
+    )
+
+    await consumer._handle_message(message)
+
+    assert message.acked
+    assert sink.calls == [
+        ('request-1', {'type': 'token', 'content': 'Ответ'}),
+        ('request-1', {'type': 'done'}),
+    ]
+    assert graph.states[0]['session_id'] == 'conversation-1'
+    assert graph.configs[0] == {'configurable': {'thread_id': 'conversation-1'}}
 
 
 async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():
@@ -116,14 +153,14 @@ async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
-    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
 
     await consumer._handle_message(message)
 
     assert message.acked
     assert sink.calls == [
-        ('s1', {'type': 'token', 'content': 'Финальный ответ.'}),
-        ('s1', {'type': 'done'}),
+        ('r1', {'type': 'token', 'content': 'Финальный ответ.'}),
+        ('r1', {'type': 'done'}),
     ]
 
 
@@ -141,14 +178,14 @@ async def test_ignores_stream_events_without_confirmed_graph_node():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
-    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
 
     await consumer._handle_message(message)
 
     assert message.acked
     assert sink.calls == [
-        ('s1', {'type': 'token', 'content': 'Финальный ответ.'}),
-        ('s1', {'type': 'done'}),
+        ('r1', {'type': 'token', 'content': 'Финальный ответ.'}),
+        ('r1', {'type': 'done'}),
     ]
 
 
@@ -161,13 +198,13 @@ async def test_failure_before_streaming_retries_then_succeeds():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
-    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
 
     await consumer._handle_message(message)
 
     assert graph.call_count == 2
     assert message.acked
-    assert ('s1', {'type': 'done'}) in sink.calls
+    assert ('r1', {'type': 'done'}) in sink.calls
     assert not any(event.get('type') == 'error' for _, event in sink.calls)
 
 
@@ -181,14 +218,14 @@ async def test_failure_before_streaming_exhausts_retries_goes_to_dlq():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
-    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
 
     await consumer._handle_message(message)
 
     assert graph.call_count == 3
     assert message.nacked_requeue is False
     assert not message.acked
-    assert sink.calls[-1] == ('s1', {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'})
+    assert sink.calls[-1] == ('r1', {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'})
 
 
 async def test_failure_after_streaming_started_does_not_retry_and_acks():
@@ -197,7 +234,7 @@ async def test_failure_after_streaming_started_does_not_retry_and_acks():
     graph = _FakeGraph([[_token_event('Начало ответа'), RuntimeError('обрыв соединения с LLM')]])
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
-    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
 
     await consumer._handle_message(message)
 
@@ -205,6 +242,6 @@ async def test_failure_after_streaming_started_does_not_retry_and_acks():
     assert message.acked
     assert message.nacked_requeue is None
     assert sink.calls == [
-        ('s1', {'type': 'token', 'content': 'Начало ответа'}),
-        ('s1', {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'}),
+        ('r1', {'type': 'token', 'content': 'Начало ответа'}),
+        ('r1', {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'}),
     ]

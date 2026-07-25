@@ -37,7 +37,7 @@ FINAL_RESPONSE_NODES = frozenset({'generate_direct', 'generate_with_context'})
 """
 
 TokenSink = Callable[[str, dict], Awaitable[None]]
-"""Принимает `(session_id, событие)`. Событие — SSE-контракт (раздел 3.2
+"""Принимает `(request_id, событие)`. Событие — SSE-контракт (раздел 3.2
 плана): `{"type": "token", "content": ...}` / `{"type": "done"}` /
 `{"type": "error", "detail": ...}`. Конкретная реализация — `session_bus`
 (Этап 7); здесь используется только через этот интерфейс, чтобы Этап 6
@@ -179,6 +179,7 @@ class AgentRequestConsumer:
             return
 
         span.set_attribute('session.id', payload.session_id)
+        span.set_attribute('request.id', payload.request_id)
         span.set_attribute('user.authenticated', payload.user_id is not None)
         span.set_attribute('agent.input.char_count', len(payload.message))
         self._set_captured_content(
@@ -199,13 +200,13 @@ class AgentRequestConsumer:
             trace_data.response_char_count = 0
             try:
                 async for content in self._stream_answer(payload):
-                    await self._token_sink(payload.session_id, {'type': 'token', 'content': content})
+                    await self._token_sink(payload.request_id, {'type': 'token', 'content': content})
                     streaming_started = True
                     trace_data.streaming_started = True
                     response_chunks.append(content)
                     trace_data.response_chunk_count += 1
                     trace_data.response_char_count += len(content)
-                await self._token_sink(payload.session_id, {'type': 'done'})
+                await self._token_sink(payload.request_id, {'type': 'done'})
                 await message.ack()
                 trace_data.outcome = 'degraded' if trace_data.search_unavailable else 'done'
                 self._set_captured_content(
@@ -220,10 +221,13 @@ class AgentRequestConsumer:
                 last_error = error
                 if streaming_started:
                     logger.error(
-                        '❌ Ошибка после начала стриминга (session_id=%s): %s', payload.session_id, error
+                        '❌ Ошибка после начала стриминга (session_id=%s, request_id=%s): %s',
+                        payload.session_id,
+                        payload.request_id,
+                        error,
                     )
                     await self._token_sink(
-                        payload.session_id,
+                        payload.request_id,
                         {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'},
                     )
                     await message.ack()
@@ -242,23 +246,27 @@ class AgentRequestConsumer:
                     attributes={'retry.attempt': attempt, 'error.type': type(error).__name__},
                 )
                 logger.warning(
-                    '⚠️ Ошибка обработки сообщения до начала стриминга (попытка %d/%d, session_id=%s): %s',
+                    '⚠️ Ошибка обработки сообщения до начала стриминга '
+                    '(попытка %d/%d, session_id=%s, request_id=%s): %s',
                     attempt,
                     self._retries,
                     payload.session_id,
+                    payload.request_id,
                     error,
                 )
                 if attempt < self._retries:
                     await asyncio.sleep(_get_backoff_delay(attempt))
 
         logger.error(
-            '❌ Не удалось обработать сообщение после %d попыток (session_id=%s): %s',
+            '❌ Не удалось обработать сообщение после %d попыток '
+            '(session_id=%s, request_id=%s): %s',
             self._retries,
             payload.session_id,
+            payload.request_id,
             last_error,
         )
         await self._token_sink(
-            payload.session_id, {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'}
+            payload.request_id, {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'}
         )
         await message.nack(requeue=False)
         trace_data.outcome = 'dlq'

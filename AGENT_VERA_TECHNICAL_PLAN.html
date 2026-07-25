@@ -604,18 +604,18 @@
             <div class="subsection-title">Схема взаимодействия</div>
             <div class="flow"><span class="node">Клиент (браузер)</span>
   │
-  │  POST /api/v1/agent/ask  { session_id, user_id?, message }
+  │  POST /api/vera/chat  { session_id, request_id, message }
   ▼
 <span class="node">Next.js Proxy</span>
   │  публикует задачу в очередь
   ▼
 <span class="node">RabbitMQ</span>  <span class="mut">queue: agent.requests</span>
-  │  <span class="mut">payload: { session_id, user_id, message, history[] }</span>
+  │  <span class="mut">payload: { session_id, request_id, user_id?, message }</span>
   │  <span class="mut">retry x3, dead-letter queue при исчерпании попыток</span>
   ▼
 <span class="node">Agent Service</span>  <span class="mut">(worker, LangGraph)</span>
   │
-  ├── формирует контекст диалога из history[]
+  ├── восстанавливает историю из Redis по session_id
   ├── отправляет в LLM с описанием инструментов
   │   LLM решает вызвать kb_search
   │
@@ -636,7 +636,7 @@
             <div class="list-wrap">
                 <div class="list-item"><span class="dot"></span><span><strong>RabbitMQ</strong> — гарантирует что задача не потеряется (надёжность на входе). Retry x3, экспоненциальная задержка, dead-letter queue при исчерпании.</span></div>
                 <div class="list-item"><span class="dot"></span><span><strong>SSE</strong> — доставляет ответ в браузер в реальном времени (стриминг токенов).</span></div>
-                <div class="list-item"><span class="dot"></span><span>Гибрид: клиент открывает SSE-соединение с <code>session_id</code>, агент при готовности стримит токены в это соединение. RabbitMQ и SSE решают разные задачи и не конкурируют.</span></div>
+                <div class="list-item"><span class="dot"></span><span>Гибрид: клиент открывает SSE-соединение с уникальным <code>request_id</code> сообщения, агент при готовности стримит токены в это соединение. <code>session_id</code> отдельно адресует историю диалога. RabbitMQ и SSE решают разные задачи и не конкурируют.</span></div>
             </div>
         </div>
     </section>
