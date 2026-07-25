@@ -28,6 +28,14 @@ DEFAULT_RETRY_DELAY: float = 1.0
 DEFAULT_MAX_RETRY_DELAY: float = 30.0
 JITTER_RATIO: float = 0.1
 
+FINAL_RESPONSE_NODES = frozenset({'generate_direct', 'generate_with_context'})
+"""Только эти узлы формируют пользовательский ответ.
+
+`analyze_intent` тоже вызывает chat-модель и может породить
+`on_chat_model_stream`, но его текст является внутренним результатом маршрутизации
+и не должен попадать в SSE.
+"""
+
 TokenSink = Callable[[str, dict], Awaitable[None]]
 """Принимает `(session_id, событие)`. Событие — SSE-контракт (раздел 3.2
 плана): `{"type": "token", "content": ...}` / `{"type": "done"}` /
@@ -290,10 +298,13 @@ class AgentRequestConsumer:
     async def _stream_answer(self, payload: AgentRequestMessage) -> AsyncIterator[str]:
         config = {'configurable': {'thread_id': payload.session_id}}
         async for event in self._graph.astream_events(_initial_state(payload), config=config, version='v2'):
-            if event['event'] == 'on_chat_model_stream':
-                content = event['data']['chunk'].content
-                if content:
-                    yield content
+            if event.get('event') != 'on_chat_model_stream':
+                continue
+            if event.get('metadata', {}).get('langgraph_node') not in FINAL_RESPONSE_NODES:
+                continue
+            content = event['data']['chunk'].content
+            if content:
+                yield content
 
 
 def _parse_payload(body: bytes) -> AgentRequestMessage:

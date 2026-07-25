@@ -87,7 +87,7 @@ class _ToolCallingGraph:
                 timeout_seconds=1.0,
             )
             trace_data.search_chunk_count = len(result['chunks'])
-            yield {'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('Ответ')}}
+            yield _stream_event('Ответ', node='generate_with_context')
 
         return _generator()
 
@@ -120,7 +120,7 @@ class _DegradedGraph:
             trace_data.search_unavailable = True
             trace_data.tool_call_count = 1
             trace_data.outcome = 'degraded'
-            yield {'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('fallback')}}
+            yield _stream_event('fallback', node='generate_with_context')
 
         return _generator()
 
@@ -128,6 +128,14 @@ class _DegradedGraph:
 class _Chunk:
     def __init__(self, content: str):
         self.content = content
+
+
+def _stream_event(content: str, node: str = 'generate_direct') -> dict:
+    return {
+        'event': 'on_chat_model_stream',
+        'metadata': {'langgraph_node': node},
+        'data': {'chunk': _Chunk(content)},
+    }
 
 
 class _FakeMessage:
@@ -185,8 +193,8 @@ async def test_publish_many_tokens_does_not_create_sse_spans():
 async def test_message_creates_one_agent_root_with_safe_direct_attributes():
     graph = _FakeGraph(
         [
-            {'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('A')}},
-            {'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('Б')}},
+            _stream_event('A'),
+            _stream_event('Б'),
         ]
     )
     consumer = _build_consumer(graph, capture=False)
@@ -207,9 +215,7 @@ async def test_message_creates_one_agent_root_with_safe_direct_attributes():
 
 
 async def test_capture_contains_only_current_message_and_truncated_final_output():
-    graph = _FakeGraph(
-        [{'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('123456')}}]
-    )
+    graph = _FakeGraph([_stream_event('123456')])
     consumer = _build_consumer(graph, capture=True, max_chars=5)
 
     await consumer._handle_message(
@@ -265,10 +271,10 @@ async def test_retry_before_streaming_resets_output_and_is_counted():
     graph = _SequenceGraph(
         [
             [
-                {'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('')}},
+                _stream_event(''),
                 RuntimeError('before streaming'),
             ],
-            [{'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('final')}}],
+            [_stream_event('final')],
         ]
     )
     consumer = _build_consumer(graph, capture=True)
@@ -287,7 +293,7 @@ async def test_error_after_first_token_is_terminal_root_error_without_retry():
     graph = _SequenceGraph(
         [
             [
-                {'event': 'on_chat_model_stream', 'data': {'chunk': _Chunk('partial')}},
+                _stream_event('partial'),
                 RuntimeError('stream interrupted'),
             ]
         ]

@@ -34,7 +34,11 @@ class _FakeGraph:
 
 
 def _token_event(content: str) -> dict:
-    return {'event': 'on_chat_model_stream', 'data': {'chunk': SimpleNamespace(content=content)}}
+    return {
+        'event': 'on_chat_model_stream',
+        'metadata': {'langgraph_node': 'generate_direct'},
+        'data': {'chunk': SimpleNamespace(content=content)},
+    }
 
 
 class _TokenSinkRecorder:

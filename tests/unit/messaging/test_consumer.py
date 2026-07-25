@@ -40,8 +40,12 @@ class _FakeGraph:
         return _generator()
 
 
-def _token_event(content: str) -> dict:
-    return {'event': 'on_chat_model_stream', 'data': {'chunk': SimpleNamespace(content=content)}}
+def _token_event(content: str, node: str = 'generate_direct') -> dict:
+    return {
+        'event': 'on_chat_model_stream',
+        'metadata': {'langgraph_node': node},
+        'data': {'chunk': SimpleNamespace(content=content)},
+    }
 
 
 class _TokenSinkRecorder:
@@ -97,6 +101,53 @@ async def test_successful_message_streams_tokens_and_acks():
     assert sink.calls == [
         ('s1', {'type': 'token', 'content': 'Квота'}),
         ('s1', {'type': 'token', 'content': ' 2%.'}),
+        ('s1', {'type': 'done'}),
+    ]
+
+
+async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():
+    graph = _FakeGraph(
+        [
+            [
+                _token_event('Внутренний ответ анализа.', node='analyze_intent'),
+                _token_event('Финальный ответ.', node='generate_with_context'),
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+
+    await consumer._handle_message(message)
+
+    assert message.acked
+    assert sink.calls == [
+        ('s1', {'type': 'token', 'content': 'Финальный ответ.'}),
+        ('s1', {'type': 'done'}),
+    ]
+
+
+async def test_ignores_stream_events_without_confirmed_graph_node():
+    graph = _FakeGraph(
+        [
+            [
+                {
+                    'event': 'on_chat_model_stream',
+                    'data': {'chunk': SimpleNamespace(content='Неизвестный источник')},
+                },
+                _token_event('Финальный ответ.'),
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(body=b'{"session_id": "s1", "message": "?"}')
+
+    await consumer._handle_message(message)
+
+    assert message.acked
+    assert sink.calls == [
+        ('s1', {'type': 'token', 'content': 'Финальный ответ.'}),
         ('s1', {'type': 'done'}),
     ]
 
