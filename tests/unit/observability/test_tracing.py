@@ -6,7 +6,11 @@ from opentelemetry import propagate, trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
-from app.clients.mcp_client import call_tool_with_retry, inject_trace_context
+from app.clients.mcp_client import (
+    call_mutating_tool_once,
+    call_tool_with_retry,
+    inject_trace_context,
+)
 from app.core.settings import ObservabilitySettings
 from app.messaging.consumer import AgentRequestConsumer
 from app.observability.request_trace import get_request_trace
@@ -52,6 +56,17 @@ class _FlakyTool:
         if self.call_count == 1:
             raise RuntimeError('temporary MCP failure')
         return {'chunks': []}
+
+
+class _FakeConsultationEmailTool:
+    name = 'send_consultation_email'
+
+    async def ainvoke(self, arguments: dict):
+        return {
+            'status': 'ok',
+            'email': arguments['email'],
+            'document_name': 'consultation.pdf',
+        }
 
 
 class _FakeGraph:
@@ -183,6 +198,34 @@ async def test_tool_call_creates_logical_span_with_aggregates():
     assert span.attributes['output.mime_type'] == 'application/json'
     assert span.attributes['tool.retry.count'] == 0
     assert span.attributes['tool.outcome'] == 'empty'
+
+
+async def test_mutating_tool_span_excludes_consultation_and_email():
+    consultation_text = 'Секретный полный текст консультации'
+    email = 'private@example.com'
+
+    await call_mutating_tool_once(
+        _FakeConsultationEmailTool(),
+        {
+            'consultation_text': consultation_text,
+            'email': email,
+        },
+        timeout_seconds=1.0,
+    )
+
+    span = _finished_span('tool.send_consultation_email')
+    assert span.attributes['openinference.span.kind'] == 'TOOL'
+    assert span.attributes['tool.retry.count'] == 0
+    assert span.attributes['tool.input.consultation_char_count'] == len(
+        consultation_text
+    )
+    assert span.attributes['tool.input.email_provided'] is True
+    assert span.attributes['tool.outcome'] == 'ok'
+    serialized_attributes = str(dict(span.attributes))
+    assert consultation_text not in serialized_attributes
+    assert email not in serialized_attributes
+    assert 'input.value' not in span.attributes
+    assert 'output.value' not in span.attributes
 
 
 async def test_publish_many_tokens_does_not_create_sse_spans():

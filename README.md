@@ -1,21 +1,21 @@
 # vera_agent_service
 
-Agent Service — оркестратор диалога AI-консультанта «Вера» (проект «Работа для всех»): принимает вопрос пользователя, решает, нужен ли поиск по базе знаний, и стримит ответ клиенту. Не хранит контент базы знаний и не знает деталей реализации инструментов — общается с ними только через внешние контракты (см. ниже).
+Agent Service — оркестратор диалога AI-консультанта «Вера» (проект «Работа для всех»): принимает вопрос пользователя, выбирает нужный инструмент и стримит ответ клиенту. Не хранит контент базы знаний и не знает деталей реализации инструментов — общается с ними только через внешние контракты (см. ниже).
 
 ## Роль в системе
 
 Один из трёх сервисов архитектуры ассистента (`AGENT_VERA_ARCHITECTURE.md`): **Agent Service** (этот репозиторий, оркестратор) → **MCP Tools Server** (`vera_mcp_service`, прослойка инструментов) → **RAG Service** (`vera_rag_service`, семантический поиск по базе знаний).
 
-Итерация 1: единственный инструмент — `vera_rag_kb` (поиск по базе знаний Vera RAG), доступен без авторизации. Полная история решений, находок и статус по этапам — `AGENT_SERVICE_PLAN.md`.
+Агенту доступны два общих инструмента без авторизации: `vera_rag_kb` для поиска по базе знаний и `send_consultation_email` для отправки уже состоявшейся консультации в доступном PDF. Полная история решений и статус по этапам — `AGENT_SERVICE_PLAN.md`.
 
 ## Как это работает
 
 1. **Приём запроса** — consumer слушает очередь `agent.requests` (RabbitMQ). Payload не содержит истории диалога: `session_id` адресует историю, `request_id` — доставку ответа конкретного сообщения (`app/messaging/schemas.py`).
-2. **Граф LangGraph** (`app/graph/`) — `analyze_intent` (короткий вызов LLM без стриминга: нужен ли `vera_rag_kb`) → при необходимости `call_kb_search` (внутреннее имя узла, вызывающего MCP-инструмент) → `generate_with_context`/`generate_direct` (стримингованная финальная генерация). Три ветки ответа при поиске: есть релевантные чанки / база честно не нашла ответ / поиск технически недоступен — модель не выдумывает факты ни в одном из случаев.
+2. **Граф LangGraph** (`app/graph/`) — `analyze_intent` выбирает прямой ответ, поиск через `call_kb_search` или отправку через `call_consultation_email`; затем `generate_with_context`/`generate_direct` стримит финальный ответ. Поиск различает найденные данные, честное отсутствие ответа и техническую недоступность.
 3. **История диалога** — Redis (LangGraph checkpointer, `app/checkpoint/`), ключ треда — `session_id`, TTL по умолчанию 24 часа неактивности. Единственный источник истории — не дублируется в payload RabbitMQ.
-4. **MCP Tools Server** — `app/clients/mcp_client.py::build_kb_search_tool_proxy` собирает граф без сетевого обращения к нему; реальный удалённый `vera_rag_kb` резолвится лениво при первом фактическом вызове. При недоступности MCP или RAG ответы по вопросам, требующим поиска, честно сообщают о временной недоступности.
+4. **MCP Tools Server** — локальные прокси-схемы собирают граф без сетевого обращения; оба удалённых инструмента резолвятся лениво при первом фактическом вызове. Идемпотентный поиск допускает ретраи. Мутирующая отправка письма выполняется строго один раз с отдельным увеличенным timeout: после сетевой неопределённости агент не повторяет ни тулу, ни весь граф.
 5. **Доставка ответа** — `GET /sse/{request_id}` (`app/streaming/`), токены по мере генерации, терминальные события `done`/`error`. `request_id` изолирует late-connect буфер и SSE одного сообщения от других запросов той же сессии. Одна реплика сервиса по-прежнему не масштабируется без перехода на Redis Pub/Sub.
-6. **Наблюдаемость** — OpenTelemetry + `openinference-instrumentation-langchain` → Arize Phoenix (`app/observability/`). Один корневой span `vera.agent.request` охватывает обработку сообщения целиком; LLM/LangGraph остаются под автоинструментацией, а вызов поиска начинается с ручного `tool.vera_rag_kb`. SSE-токены учитываются счётчиками корневого span и не создают span на каждый токен.
+6. **Наблюдаемость** — OpenTelemetry + `openinference-instrumentation-langchain` → Arize Phoenix (`app/observability/`). Один корневой span `vera.agent.request` охватывает обработку сообщения целиком. Для `tool.send_consultation_email` сохраняются только безопасные агрегаты и статус — текст консультации, email и полный ответ тулы в этот span не записываются.
 
 ## Стек
 
@@ -30,6 +30,7 @@ FastAPI/`hypercorn` · LangGraph · `langchain-openai` (LLM-провайдер �
 | `agent.requests` (RabbitMQ) | Next.js Proxy → Agent Service | `{session_id, request_id, user_id, message}`, без истории; `request_id` обязателен, retry только для системных сбоев, DLQ `agent.requests.dlq` |
 | `GET /sse/{request_id}` | Клиент ← Agent Service | `data: {"type": "token"/"done"/"error", ...}` только для одного пользовательского запроса |
 | Тул `vera_rag_kb` (MCP) | Agent Service → MCP Tools Server | `vera_rag_kb(query: str) -> {"chunks": [...]}` — роль пользователя не передаётся в поиск; формат чанков совпадает с `POST /api/v1/search` в `vera_rag_service` |
+| Тул `send_consultation_email` (MCP) | Agent Service → MCP Tools Server | `send_consultation_email(consultation_text: str, email: str) -> dict`; вызывается только по явной просьбе с указанным адресом, не ретраится |
 | `GET /health` | Оркестратор/мониторинг | `rabbitmq`/`redis` — жёсткий статус (влияет на код ответа); `mcp` — информационное поле, недоступность не даёт `503` |
 
 ## Запуск локально
@@ -59,15 +60,18 @@ project не просто складывает spans рядом, а позвол
 ```text
 vera.agent.request                 vera_agent_service
 ├── LangChain/LLM spans            vera_agent_service
-└── tool.vera_rag_kb               vera_agent_service
-    └── mcp.execute.vera_rag_kb    vera_mcp_service
-        └── rag.search             vera_rag_service
+├── tool.vera_rag_kb               vera_agent_service
+│   └── mcp.execute.vera_rag_kb    vera_mcp_service
+│       └── rag.search             vera_rag_service
+└── tool.send_consultation_email   vera_agent_service
+    └── mcp.execute.*              vera_mcp_service
 ```
 
 На корневом span видны `session.id`, результат маршрутизации, факт поиска,
 число найденных чанков, итог обработки, число повторов и счётчики стриминга.
-Phoenix также получает полный текст входа/выхода, системные промпты, историю
-сообщений, аргументы и результаты инструментов. `PHOENIX_ENABLED=false`
+Phoenix также получает полный текст входа/выхода, системные промпты и историю
+сообщений. У поисковой тулы сохраняются аргументы и результат, а у email-тулы
+они намеренно исключены из ручного span. `PHOENIX_ENABLED=false`
 отключает экспорт без изменения публичных функциональных контрактов. При
 штатной остановке накопленные spans принудительно отправляются перед
 завершением процесса.
@@ -118,4 +122,4 @@ ruff check .                 # линтер
 
 ## Статус
 
-Итерация 1 реализована (`AGENT_SERVICE_PLAN.md`, этапы 0–12). Agent Service подключается к развёрнутому MCP Tools Server по streamable-http и использует публичный инструмент `vera_rag_kb`; при недоступности поиска граф переходит в спроектированную ветку деградации. Unit-набор и статические проверки проходят без локального поднятия инфраструктуры; полный integration/E2E-прогон остаётся шагом production-приёмки.
+Базовая итерация и интеграция `send_consultation_email` реализованы. Agent Service подключается к MCP Tools Server по streamable-http, безопасно деградирует при недоступности поиска и не допускает автоматического дубля письма после неопределённого результата отправки. Полный production E2E с реальным SMTP остаётся шагом приёмки.

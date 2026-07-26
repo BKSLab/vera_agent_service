@@ -86,9 +86,11 @@ class McpSettings(SettingsBase):
     mcp_server_url: str = 'http://localhost:9000/mcp'
     mcp_call_timeout_seconds: float = 5.0
     mcp_call_retries: int = 2
-    """Retry на уровне MCP-клиента — независим от retry-политики самого
-    RabbitMQ-сообщения (Этап 3.2/6.3 плана, раздел 6, открытый вопрос:
-    конкретные значения таймаута/числа повторов подлежат подтверждению)."""
+    """Retry только для безопасных идемпотентных MCP-вызовов."""
+
+    mcp_consultation_email_timeout_seconds: float = 360.0
+    """Отдельный timeout мутирующей тулы: внутри MCP выполняются LLM,
+    PDF-рендер и SMTP. Внешние retries для неё запрещены."""
 
 
 class ObservabilitySettings(SettingsBase):

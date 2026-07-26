@@ -46,7 +46,7 @@ def _completion(message: dict, finish_reason: str) -> httpx.Response:
     )
 
 
-def _tool_call_completion(query: str) -> httpx.Response:
+def _tool_call_completion(name: str, arguments: dict) -> httpx.Response:
     return _completion(
         {
             'role': 'assistant',
@@ -56,8 +56,8 @@ def _tool_call_completion(query: str) -> httpx.Response:
                     'id': 'call_1',
                     'type': 'function',
                     'function': {
-                        'name': 'vera_rag_kb',
-                        'arguments': json.dumps({'query': query}),
+                        'name': name,
+                        'arguments': json.dumps(arguments),
                     },
                 }
             ],
@@ -99,18 +99,39 @@ def _build_chat_model(handler) -> ChatOpenAI:
     )
 
 
-def _conversational_handler(*, needs_tool: bool, tool_query: str = 'квота', final_pieces: list[str] | None = None):
+def _conversational_handler(
+    *,
+    tool_name: str | None = None,
+    tool_arguments: dict | None = None,
+    final_pieces: list[str] | None = None,
+):
     final_pieces = final_pieces or ['Квота ', 'составляет ', '2%.']
 
     def handler(request):
         payload = json.loads(request.content)
         if not payload.get('stream'):
             # analyze_intent: нестримингованный вызов с забинженными тулами
-            return _tool_call_completion(tool_query) if needs_tool else _direct_completion('ok')
+            if tool_name is not None:
+                return _tool_call_completion(tool_name, tool_arguments or {})
+            return _direct_completion('ok')
         # generate_with_context / generate_direct: стримингованный вызов
         return _stream_response(final_pieces)
 
     return handler
+
+
+def _tools_by_name(tools) -> dict:
+    return {tool.name: tool for tool in tools}
+
+
+def _compile_graph(chat_model, tools, settings):
+    by_name = _tools_by_name(tools)
+    return build_graph(
+        chat_model,
+        by_name['vera_rag_kb'],
+        by_name['send_consultation_email'],
+        settings,
+    ).compile()
 
 
 async def test_question_needing_kb_search_reaches_generate_with_context():
@@ -122,9 +143,13 @@ async def test_question_needing_kb_search_reaches_generate_with_context():
         tools = await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=5.0)
 
         chat_model = _build_chat_model(
-            _conversational_handler(needs_tool=True, tool_query='квота', final_pieces=['Квота ', '2%, источник ФЗ-181.'])
+            _conversational_handler(
+                tool_name='vera_rag_kb',
+                tool_arguments={'query': 'квота'},
+                final_pieces=['Квота ', '2%, источник ФЗ-181.'],
+            )
         )
-        graph = build_graph(chat_model, tools[0], mcp_settings).compile()
+        graph = _compile_graph(chat_model, tools, mcp_settings)
 
         result = await graph.ainvoke(_initial_state('Какая квота на трудоустройство инвалидов?'))
 
@@ -144,9 +169,9 @@ async def test_greeting_goes_directly_to_generate_direct_without_mcp_call():
         tools = await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=5.0)
 
         chat_model = _build_chat_model(
-            _conversational_handler(needs_tool=False, final_pieces=['Здравствуйте', '! Чем могу помочь?'])
+            _conversational_handler(final_pieces=['Здравствуйте', '! Чем могу помочь?'])
         )
-        graph = build_graph(chat_model, tools[0], mcp_settings).compile()
+        graph = _compile_graph(chat_model, tools, mcp_settings)
 
         result = await graph.ainvoke(_initial_state('привет'))
 
@@ -165,10 +190,12 @@ async def test_mcp_unavailable_degrades_gracefully_without_raising():
 
         chat_model = _build_chat_model(
             _conversational_handler(
-                needs_tool=True, tool_query='квота', final_pieces=['Поиск сейчас недоступен, попробуйте позже.']
+                tool_name='vera_rag_kb',
+                tool_arguments={'query': 'квота'},
+                final_pieces=['Поиск сейчас недоступен, попробуйте позже.'],
             )
         )
-        graph = build_graph(chat_model, tools[0], mcp_settings).compile()
+        graph = _compile_graph(chat_model, tools, mcp_settings)
 
         result = await graph.ainvoke(_initial_state('Какая квота на трудоустройство инвалидов?'))
 
@@ -187,12 +214,12 @@ async def test_empty_chunks_produces_honest_refusal_not_error():
 
         chat_model = _build_chat_model(
             _conversational_handler(
-                needs_tool=True,
-                tool_query='вопрос вне тематики',
+                tool_name='vera_rag_kb',
+                tool_arguments={'query': 'вопрос вне тематики'},
                 final_pieces=['В базе знаний нет ответа на этот вопрос.'],
             )
         )
-        graph = build_graph(chat_model, tools[0], mcp_settings).compile()
+        graph = _compile_graph(chat_model, tools, mcp_settings)
 
         result = await graph.ainvoke(_initial_state('Вопрос вне тематики базы знаний'))
 
@@ -213,8 +240,13 @@ async def test_first_token_arrives_quickly_against_mocked_llm():
         mcp_client = get_mcp_client(mcp_settings)
         tools = await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=5.0)
 
-        chat_model = _build_chat_model(_conversational_handler(needs_tool=True, tool_query='квота'))
-        graph = build_graph(chat_model, tools[0], mcp_settings).compile()
+        chat_model = _build_chat_model(
+            _conversational_handler(
+                tool_name='vera_rag_kb',
+                tool_arguments={'query': 'квота'},
+            )
+        )
+        graph = _compile_graph(chat_model, tools, mcp_settings)
 
         start = time.perf_counter()
         first_token_at: float | None = None
@@ -225,3 +257,51 @@ async def test_first_token_arrives_quickly_against_mocked_llm():
 
         assert first_token_at is not None
         assert (first_token_at - start) < 2.0
+
+
+async def test_consultation_email_is_called_once_with_complete_arguments():
+    requests: list[dict] = []
+    app = create_mock_mcp_app(consultation_requests=requests)
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(
+            mcp_server_url=url,
+            mcp_call_timeout_seconds=5.0,
+            mcp_call_retries=1,
+            mcp_consultation_email_timeout_seconds=5.0,
+        )
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(
+            mcp_client,
+            retries=1,
+            timeout_seconds=5.0,
+        )
+        consultation_text = (
+            'Итоговая консультация.\n\nРаботодатель обязан учитывать '
+            'требования законодательства.'
+        )
+        chat_model = _build_chat_model(
+            _conversational_handler(
+                tool_name='send_consultation_email',
+                tool_arguments={
+                    'consultation_text': consultation_text,
+                    'email': 'user@example.com',
+                },
+                final_pieces=['Документ отправлен на user@example.com.'],
+            )
+        )
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        result = await graph.ainvoke(
+            _initial_state('Отправь консультацию на user@example.com')
+        )
+
+        assert requests == [
+            {
+                'consultation_text': consultation_text,
+                'email': 'user@example.com',
+            }
+        ]
+        assert result['tool_calls'] == ['send_consultation_email']
+        assert result['messages'][-1].content == (
+            'Документ отправлен на user@example.com.'
+        )

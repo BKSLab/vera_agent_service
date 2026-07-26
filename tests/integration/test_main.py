@@ -1,6 +1,5 @@
 """Интеграционные тесты сборки приложения (Этап 8) — реальные RabbitMQ и
-Redis из `docker-compose.yml`, MCP Tools Server сознательно недоступен
-(сервиса ещё не существует, см. AGENT_SERVICE_PLAN.md, раздел 0).
+Redis; доступность MCP Tools Server не является жёстким startup-условием.
 """
 
 import httpx
@@ -13,9 +12,7 @@ pytestmark = pytest.mark.integration
 
 
 async def test_app_starts_and_health_reports_hard_dependencies_ok():
-    """MCP недоступен, но это не мешает приложению стартовать и не
-    переводит /health в 503 (раздел 0.1 — MCP не входит в жёсткий
-    startup-чек, недоступность — информационное поле)."""
+    """Статус MCP информационный и не переводит /health в 503."""
     async with lifespan(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
@@ -26,7 +23,9 @@ async def test_app_starts_and_health_reports_hard_dependencies_ok():
     assert body['status'] == 'ok'
     assert body['rabbitmq'] == 'ok'
     assert body['redis'] == 'ok'
-    assert body['mcp'] == 'unavailable'
+    # MCP — информационная зависимость: тест не должен зависеть от того,
+    # запущен ли внешний Tools Server в конкретном окружении.
+    assert body['mcp'] in {'ok', 'unavailable'}
 
 
 async def test_sse_endpoint_is_mounted_and_accepts_connection():

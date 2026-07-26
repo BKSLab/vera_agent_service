@@ -4,7 +4,12 @@ streamable-http, без обращения к развёрнутому `vera_mcp
 
 import pytest
 
-from app.clients.mcp_client import call_tool_with_retry, get_mcp_client, get_tools_with_retry
+from app.clients.mcp_client import (
+    call_mutating_tool_once,
+    call_tool_with_retry,
+    get_mcp_client,
+    get_tools_with_retry,
+)
 from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
 from tests.fixtures.mock_mcp_server import create_mock_mcp_app, run_mock_mcp_server
@@ -22,10 +27,14 @@ async def test_get_tools_and_call_kb_search_against_real_mock_server():
         tools = await get_tools_with_retry(
             client, retries=settings.mcp_call_retries, timeout_seconds=settings.mcp_call_timeout_seconds
         )
-        assert [tool.name for tool in tools] == ['vera_rag_kb']
+        tools_by_name = {tool.name: tool for tool in tools}
+        assert set(tools_by_name) == {
+            'vera_rag_kb',
+            'send_consultation_email',
+        }
 
         result = await call_tool_with_retry(
-            tools[0],
+            tools_by_name['vera_rag_kb'],
             {'query': 'квота'},
             retries=settings.mcp_call_retries,
             timeout_seconds=settings.mcp_call_timeout_seconds,
@@ -41,9 +50,13 @@ async def test_call_kb_search_returns_empty_chunks_when_rag_has_no_answer():
         settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=1)
         client = get_mcp_client(settings)
         tools = await get_tools_with_retry(client, retries=1, timeout_seconds=5.0)
+        tools_by_name = {tool.name: tool for tool in tools}
 
         result = await call_tool_with_retry(
-            tools[0], {'query': 'вопрос вне тематики БЗ'}, retries=1, timeout_seconds=5.0
+            tools_by_name['vera_rag_kb'],
+            {'query': 'вопрос вне тематики БЗ'},
+            retries=1,
+            timeout_seconds=5.0,
         )
         assert result == {'chunks': []}
 
@@ -54,9 +67,15 @@ async def test_call_kb_search_raises_mcp_unavailable_when_tool_execution_fails()
         settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=2)
         client = get_mcp_client(settings)
         tools = await get_tools_with_retry(client, retries=1, timeout_seconds=5.0)
+        tools_by_name = {tool.name: tool for tool in tools}
 
         with pytest.raises(McpUnavailableError):
-            await call_tool_with_retry(tools[0], {'query': 'q'}, retries=2, timeout_seconds=5.0)
+            await call_tool_with_retry(
+                tools_by_name['vera_rag_kb'],
+                {'query': 'q'},
+                retries=2,
+                timeout_seconds=5.0,
+            )
 
 
 async def test_call_kb_search_raises_mcp_unavailable_on_timeout():
@@ -65,9 +84,39 @@ async def test_call_kb_search_raises_mcp_unavailable_on_timeout():
         settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=1)
         client = get_mcp_client(settings)
         tools = await get_tools_with_retry(client, retries=1, timeout_seconds=5.0)
+        tools_by_name = {tool.name: tool for tool in tools}
 
         with pytest.raises(McpUnavailableError):
-            await call_tool_with_retry(tools[0], {'query': 'q'}, retries=1, timeout_seconds=0.2)
+            await call_tool_with_retry(
+                tools_by_name['vera_rag_kb'],
+                {'query': 'q'},
+                retries=1,
+                timeout_seconds=0.2,
+            )
+
+
+async def test_call_consultation_email_once_against_real_mock_server():
+    requests: list[dict] = []
+    app = create_mock_mcp_app(consultation_requests=requests)
+    async with run_mock_mcp_server(app) as url:
+        settings = McpSettings(mcp_server_url=url)
+        client = get_mcp_client(settings)
+        tools = await get_tools_with_retry(client, retries=1, timeout_seconds=5.0)
+        tools_by_name = {tool.name: tool for tool in tools}
+        arguments = {
+            'consultation_text': 'Полный текст консультации',
+            'email': 'user@example.com',
+        }
+
+        result = await call_mutating_tool_once(
+            tools_by_name['send_consultation_email'],
+            arguments,
+            timeout_seconds=5.0,
+        )
+
+        assert result['status'] == 'ok'
+        assert result['email'] == 'user@example.com'
+        assert requests == [arguments]
 
 
 async def test_get_tools_with_retry_raises_when_server_unreachable():

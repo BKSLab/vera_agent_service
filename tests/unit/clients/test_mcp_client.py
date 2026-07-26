@@ -4,17 +4,25 @@ import pytest
 
 from app.clients.mcp_client import (
     _parse_tool_result,
+    build_consultation_email_tool_proxy,
     build_kb_search_tool_proxy,
+    call_mutating_tool_once,
     call_tool_with_retry,
+    get_mcp_client,
     get_tools_with_retry,
 )
+from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
 
 
 class _FakeTool:
-    name = 'vera_rag_kb'
-
-    def __init__(self, results: list | None = None, exceptions: list[Exception | None] | None = None):
+    def __init__(
+        self,
+        results: list | None = None,
+        exceptions: list[Exception | None] | None = None,
+        name: str = 'vera_rag_kb',
+    ):
+        self.name = name
         self._results = results or []
         self._exceptions = exceptions or []
         self.call_count = 0
@@ -66,6 +74,28 @@ async def test_get_tools_with_retry_returns_tools_on_success():
     assert result == ['tool-a']
 
 
+def test_mcp_transport_timeout_allows_long_consultation_call(monkeypatch):
+    captured: dict = {}
+
+    class _Client:
+        def __init__(self, connections, **kwargs):
+            captured['connections'] = connections
+            captured['kwargs'] = kwargs
+
+    monkeypatch.setattr('app.clients.mcp_client.MultiServerMCPClient', _Client)
+
+    get_mcp_client(
+        McpSettings(
+            mcp_call_timeout_seconds=15.0,
+            mcp_consultation_email_timeout_seconds=360.0,
+        )
+    )
+
+    connection = captured['connections']['vera-tools']
+    assert connection['timeout'] == 360.0
+    assert connection['sse_read_timeout'] == 360.0
+
+
 async def test_get_tools_with_retry_retries_then_succeeds():
     client = _FakeClient(tools=['tool-a'], exceptions=[RuntimeError('conn'), None])
     result = await get_tools_with_retry(client, retries=3, timeout_seconds=1.0)
@@ -94,6 +124,34 @@ async def test_kb_search_proxy_uses_vera_rag_kb_public_name_and_resolves_remote_
     assert remote_tool.received_arguments == [{'query': 'квота'}, {'query': 'льготы'}]
 
 
+async def test_consultation_email_proxy_resolves_remote_tool_once_and_preserves_arguments():
+    remote_tool = _FakeTool(
+        name='send_consultation_email',
+        results=[
+            {'status': 'ok', 'email': 'one@example.com'},
+            {'status': 'ok', 'email': 'two@example.com'},
+        ],
+    )
+    client = _FakeClient(tools=[_FakeTool(results=[]), remote_tool])
+    proxy = build_consultation_email_tool_proxy(client)
+
+    assert proxy.name == 'send_consultation_email'
+
+    await proxy.ainvoke(
+        {'consultation_text': 'Первая консультация', 'email': 'one@example.com'}
+    )
+    await proxy.ainvoke(
+        {'consultation_text': 'Вторая консультация', 'email': 'two@example.com'}
+    )
+
+    assert client.call_count == 1
+    assert remote_tool.call_count == 2
+    assert remote_tool.received_arguments == [
+        {'consultation_text': 'Первая консультация', 'email': 'one@example.com'},
+        {'consultation_text': 'Вторая консультация', 'email': 'two@example.com'},
+    ]
+
+
 async def test_call_tool_with_retry_parses_text_content_block():
     tool = _FakeTool(results=[[{'type': 'text', 'text': '{"chunks": []}'}]])
     result = await call_tool_with_retry(tool, {'query': 'q'}, retries=3, timeout_seconds=1.0)
@@ -119,6 +177,55 @@ async def test_call_tool_with_retry_raises_after_exhausting_retries():
 async def test_call_tool_with_retry_times_out():
     with pytest.raises(McpUnavailableError):
         await call_tool_with_retry(_HangingTool(), {'query': 'q'}, retries=1, timeout_seconds=0.05)
+
+
+async def test_mutating_tool_is_called_once_and_result_is_parsed():
+    tool = _FakeTool(
+        name='send_consultation_email',
+        results=[
+            [
+                {
+                    'type': 'text',
+                    'text': (
+                        '{"status":"ok","email":"user@example.com",'
+                        '"document_name":"consultation.pdf"}'
+                    ),
+                }
+            ]
+        ],
+    )
+
+    result = await call_mutating_tool_once(
+        tool,
+        {
+            'consultation_text': 'Полный текст',
+            'email': 'user@example.com',
+        },
+        timeout_seconds=1.0,
+    )
+
+    assert result['status'] == 'ok'
+    assert tool.call_count == 1
+
+
+async def test_mutating_tool_never_retries_after_execution_error():
+    tool = _FakeTool(
+        name='send_consultation_email',
+        results=[None, {'status': 'ok'}],
+        exceptions=[RuntimeError('connection lost'), None],
+    )
+
+    with pytest.raises(McpUnavailableError):
+        await call_mutating_tool_once(
+            tool,
+            {
+                'consultation_text': 'Полный текст',
+                'email': 'user@example.com',
+            },
+            timeout_seconds=1.0,
+        )
+
+    assert tool.call_count == 1
 
 
 def test_parse_tool_result_accepts_plain_dict():

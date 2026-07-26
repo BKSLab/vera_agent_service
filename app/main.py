@@ -8,7 +8,11 @@ from app.api.v1.endpoints.health import create_health_router
 from app.checkpoint.redis_saver import get_redis_checkpointer
 from app.clients.http_client import external_api_http_client
 from app.clients.llm import get_chat_model
-from app.clients.mcp_client import build_kb_search_tool_proxy, get_mcp_client
+from app.clients.mcp_client import (
+    build_consultation_email_tool_proxy,
+    build_kb_search_tool_proxy,
+    get_mcp_client,
+)
 from app.core.config_logger import logger
 from app.core.settings import get_settings
 from app.graph.build import build_graph
@@ -48,11 +52,19 @@ async def lifespan(app: FastAPI):
             chat_model = get_chat_model(httpx_client=external_api_http_client, settings=settings.llm)
             mcp_client = get_mcp_client(settings=settings.mcp)
             # Локальный прокси-тул — не требует доступности MCP Tools Server
-            # на старте приложения: удалённый `vera_rag_kb` резолвится лениво,
+            # на старте приложения: обе удалённые тулы резолвятся лениво,
             # а MCP сознательно не входит в жёсткий startup-чек.
             kb_search_tool = build_kb_search_tool_proxy(mcp_client)
+            consultation_email_tool = build_consultation_email_tool_proxy(
+                mcp_client
+            )
 
-            graph = build_graph(chat_model, kb_search_tool, settings.mcp).compile(checkpointer=checkpointer)
+            graph = build_graph(
+                chat_model,
+                kb_search_tool,
+                consultation_email_tool,
+                settings.mcp,
+            ).compile(checkpointer=checkpointer)
 
             consumer = AgentRequestConsumer(
                 connection_url=settings.rabbitmq.url_connect,

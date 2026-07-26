@@ -1,6 +1,12 @@
 from app.graph.prompts.description import VERA_DESCRIPTION_PROMPT
 from app.graph.prompts.role import VERA_ROLE_PROMPT
-from app.graph.prompts.system import SOURCES_PROMPT, SYSTEM_PROMPT, SYSTEM_PROMPT_PARTS, TOOL_USAGE_PROMPT
+from app.graph.prompts.system import (
+    CONSULTATION_EMAIL_PROMPT,
+    SOURCES_PROMPT,
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_PARTS,
+    TOOL_USAGE_PROMPT,
+)
 
 
 def test_prompt_defines_role_as_consultant():
@@ -65,6 +71,32 @@ def test_tool_usage_prompt_forbids_role_based_search_restriction():
     assert '"seeker"' not in lowered
     assert '"employer"' not in lowered
     assert '"both"' not in lowered
+
+
+def test_consultation_email_prompt_requires_explicit_safe_request():
+    lowered = CONSULTATION_EMAIL_PROMPT.lower()
+    assert 'явно попросил' in lowered
+    assert 'адрес email' in lowered
+    assert 'не придумывай' in lowered
+    assert 'не исправляй' in lowered
+    assert 'не более одного вызова' in lowered
+    assert 'не повторяй' in lowered
+
+
+def test_consultation_email_prompt_delegates_formatting_and_uses_full_text():
+    lowered = CONSULTATION_EMAIL_PROMPT.lower()
+    assert 'полный самодостаточный итог консультации' in lowered
+    assert 'не форматируй консультацию специально' in lowered
+    assert 'не сокращай' in lowered
+    assert 'не обрезай' in lowered
+
+
+def test_consultation_email_prompt_handles_tool_result_truthfully():
+    lowered = CONSULTATION_EMAIL_PROMPT.lower()
+    assert 'status=ok' in lowered
+    assert 'status=error' in lowered
+    assert 'не утверждай, что письмо доставлено' in lowered
+    assert 'проверить почту' in lowered
 
 
 def test_prompt_suggests_registration_for_unauthenticated_personal_requests():

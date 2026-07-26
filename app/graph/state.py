@@ -13,7 +13,8 @@ class AgentState(TypedDict):
 
     session_id: str
     user_id: str | None
-    """None — незалогиненный пользователь (доступен только `vera_rag_kb`)."""
+    """None — незалогиненный пользователь; общие консультационные тулы
+    доступны и без авторизации."""
 
     messages: Annotated[list[BaseMessage], add_messages]
     """Reducer `add_messages` обязателен: новое сообщение, переданное в

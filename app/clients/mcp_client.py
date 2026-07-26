@@ -25,12 +25,13 @@ DEFAULT_MAX_RETRY_DELAY: float = 5.0
 JITTER_RATIO: float = 0.1
 
 MCP_SERVER_NAME = 'vera-tools'
-"""Имя сервера в конфигурации `MultiServerMCPClient` — единственный сервер
-на итерацию 1 (см. AGENT_SERVICE_PLAN.md, раздел 0 — MCP Tools Server один,
-инструментов пока тоже один: `vera_rag_kb`)."""
+"""Имя единственного MCP Tools Server в конфигурации клиента."""
 
 VERA_RAG_KB_TOOL_NAME = 'vera_rag_kb'
 """Публичное имя инструмента, опубликованного `vera_mcp_service`."""
+
+SEND_CONSULTATION_EMAIL_TOOL_NAME = 'send_consultation_email'
+"""Мутирующий инструмент формирования PDF и отправки консультации."""
 
 
 async def inject_trace_context(
@@ -61,13 +62,21 @@ def get_mcp_client(settings: McpSettings) -> MultiServerMCPClient:
     content-блок вида `"Error executing tool ..."` — иначе
     `call_tool_with_retry` не сможет отличить ошибку от валидного ответа.
     """
+    # Транспортная сессия общая для обеих тул. Её read-timeout должен
+    # пропускать долгую PDF/email-операцию; более короткий SLA поиска
+    # независимо ограничивается внешним asyncio.wait_for в
+    # call_tool_with_retry.
+    transport_timeout = max(
+        settings.mcp_call_timeout_seconds,
+        settings.mcp_consultation_email_timeout_seconds,
+    )
     return MultiServerMCPClient(
         {
             MCP_SERVER_NAME: {
                 'url': settings.mcp_server_url,
                 'transport': 'streamable_http',
-                'timeout': settings.mcp_call_timeout_seconds,
-                'sse_read_timeout': settings.mcp_call_timeout_seconds,
+                'timeout': transport_timeout,
+                'sse_read_timeout': transport_timeout,
             }
         },
         handle_tool_errors=False,
@@ -195,6 +204,65 @@ async def call_tool_with_retry(
         raise unavailable_error
 
 
+async def call_mutating_tool_once(
+    tool: BaseTool,
+    arguments: dict,
+    timeout_seconds: float,
+) -> dict:
+    """Вызывает мутирующий MCP-инструмент ровно один раз.
+
+    Повтор после timeout/сетевой ошибки запрещён: SMTP мог принять письмо до
+    разрыва соединения. Полные аргументы и ответ не записываются в span,
+    поскольку содержат консультацию и email.
+    """
+    consultation_text = arguments.get('consultation_text')
+    with tracer.start_as_current_span(
+        f'tool.{tool.name}',
+        attributes={
+            SpanAttributes.OPENINFERENCE_SPAN_KIND: (
+                OpenInferenceSpanKindValues.TOOL.value
+            ),
+            'tool.name': tool.name,
+            'tool.retry.count': 0,
+            'tool.input.consultation_char_count': (
+                len(consultation_text)
+                if isinstance(consultation_text, str)
+                else 0
+            ),
+            'tool.input.email_provided': bool(arguments.get('email')),
+        },
+    ) as span:
+        try:
+            raw_result = await asyncio.wait_for(
+                tool.ainvoke(arguments),
+                timeout=timeout_seconds,
+            )
+            result = _parse_tool_result(raw_result)
+        except Exception as error:
+            unavailable_error = McpUnavailableError(
+                'Не удалось подтвердить результат мутирующего MCP-вызова'
+            )
+            span.set_attribute('tool.outcome', 'unconfirmed')
+            span.record_exception(unavailable_error)
+            span.set_status(Status(StatusCode.ERROR, str(unavailable_error)))
+            logger.error(
+                '❌ Мутирующий тул %s завершился без подтверждённого результата: %s',
+                tool.name,
+                type(error).__name__,
+            )
+            raise unavailable_error from error
+
+        status = result.get('status')
+        span.set_attribute(
+            'tool.outcome',
+            status if status in {'ok', 'error'} else 'unexpected_result',
+        )
+        error_code = result.get('code')
+        if isinstance(error_code, str):
+            span.set_attribute('tool.error.code', error_code)
+        return result
+
+
 def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
     """Локальный тул с той же сигнатурой и описанием, что и удалённый
     `vera_rag_kb` на MCP Tools Server (контракт — раздел 3.3 плана).
@@ -230,14 +298,53 @@ def build_kb_search_tool_proxy(client: MultiServerMCPClient) -> BaseTool:
     return vera_rag_kb
 
 
+def build_consultation_email_tool_proxy(
+    client: MultiServerMCPClient,
+) -> BaseTool:
+    """Локальная схема мутирующего инструмента с ленивым MCP-резолвингом.
+
+    Прокси не делает retries. Единственную попытку и отдельный timeout
+    контролирует узел ``call_consultation_email``.
+    """
+    resolved_tool: list[BaseTool] = []
+
+    @tool
+    async def send_consultation_email(
+        consultation_text: str,
+        email: str,
+    ) -> dict:
+        """Сформировать доступный PDF из полного итогового текста консультации
+        и отправить его на явно подтверждённый пользователем email.
+
+        Вызывай только после явной просьбы пользователя. Не форматируй текст:
+        MCP-инструмент сам выделит заголовки, абзацы и списки.
+        """
+        if not resolved_tool:
+            tools = await client.get_tools()
+            resolved_tool.append(
+                next(
+                    candidate
+                    for candidate in tools
+                    if candidate.name == SEND_CONSULTATION_EMAIL_TOOL_NAME
+                )
+            )
+        return await resolved_tool[0].ainvoke(
+            {
+                'consultation_text': consultation_text,
+                'email': email,
+            }
+        )
+
+    return send_consultation_email
+
+
 def _parse_tool_result(raw_result: Any) -> dict:
     """Разбирает ответ MCP-тула в обычный `dict`.
 
     MCP-протокол возвращает результат тула как список content-блоков
     (`[{"type": "text", "text": "<json>"}]`), не сырой `dict` — проверено
     эмпирически с `langchain-mcp-adapters==0.3.0`. Ожидаемый формат
-    text-блока для `vera_rag_kb` — JSON, совпадающий по структуре с ответом
-    `POST /api/v1/search` из `vera_rag_service` (раздел 3.3 плана).
+    text-блока — JSON-словарь конкретного инструмента.
     """
     if isinstance(raw_result, dict):
         return raw_result

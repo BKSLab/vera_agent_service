@@ -26,6 +26,10 @@ DEFAULT_RETRIES: int = 3
 DEFAULT_RETRY_DELAY: float = 1.0
 DEFAULT_MAX_RETRY_DELAY: float = 30.0
 JITTER_RATIO: float = 0.1
+MUTATING_TOOL_UNCONFIRMED_MESSAGE = (
+    'Не удалось подтвердить результат отправки консультации. '
+    'Проверьте почту перед новой попыткой.'
+)
 
 FINAL_RESPONSE_NODES = frozenset({'generate_direct', 'generate_with_context'})
 """Только эти узлы формируют пользовательский ответ.
@@ -204,7 +208,14 @@ class AgentRequestConsumer:
                     trace_data.response_char_count += len(content)
                 await self._token_sink(payload.request_id, {'type': 'done'})
                 await message.ack()
-                trace_data.outcome = 'degraded' if trace_data.search_unavailable else 'done'
+                trace_data.outcome = (
+                    'degraded'
+                    if (
+                        trace_data.search_unavailable
+                        or trace_data.consultation_email_status == 'error'
+                    )
+                    else 'done'
+                )
                 self._set_content(
                     span,
                     SpanAttributes.OUTPUT_VALUE,
@@ -214,6 +225,32 @@ class AgentRequestConsumer:
                 return
             except Exception as error:  # noqa: BLE001 - сбой графа тоже должен попасть сюда
                 last_error = error
+                if trace_data.mutating_tool_called:
+                    logger.error(
+                        '❌ Ошибка после начала мутирующего MCP-вызова; '
+                        'повтор графа запрещён '
+                        '(session_id=%s, request_id=%s): %s',
+                        payload.session_id,
+                        payload.request_id,
+                        type(error).__name__,
+                    )
+                    await self._token_sink(
+                        payload.request_id,
+                        {
+                            'type': 'error',
+                            'detail': MUTATING_TOOL_UNCONFIRMED_MESSAGE,
+                        },
+                    )
+                    await message.ack()
+                    trace_data.outcome = 'error'
+                    self._set_content(
+                        span,
+                        SpanAttributes.OUTPUT_VALUE,
+                        SpanAttributes.OUTPUT_MIME_TYPE,
+                        ''.join(response_chunks),
+                    )
+                    _mark_span_error(span, error)
+                    return
                 if streaming_started:
                     logger.error(
                         '❌ Ошибка после начала стриминга (session_id=%s, request_id=%s): %s',
@@ -289,6 +326,20 @@ class AgentRequestConsumer:
         span.set_attribute('agent.response.chunk_count', trace_data.response_chunk_count)
         span.set_attribute('agent.response.char_count', trace_data.response_char_count)
         span.set_attribute('agent.streaming.started', trace_data.streaming_started)
+        span.set_attribute(
+            'agent.mutating_tool.called',
+            trace_data.mutating_tool_called,
+        )
+        if trace_data.consultation_email_status is not None:
+            span.set_attribute(
+                'agent.consultation_email.status',
+                trace_data.consultation_email_status,
+            )
+        if trace_data.consultation_email_error_code is not None:
+            span.set_attribute(
+                'agent.consultation_email.error_code',
+                trace_data.consultation_email_error_code,
+            )
         span.set_attribute('agent.outcome', trace_data.outcome)
 
     async def _stream_answer(self, payload: AgentRequestMessage) -> AsyncIterator[str]:

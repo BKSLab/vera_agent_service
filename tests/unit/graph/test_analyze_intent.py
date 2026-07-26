@@ -19,6 +19,12 @@ async def vera_rag_kb(query: str) -> dict:
     return {'chunks': []}
 
 
+@tool
+async def send_consultation_email(consultation_text: str, email: str) -> dict:
+    """Отправка итоговой консультации в PDF на email."""
+    return {'status': 'ok', 'email': email, 'document_name': 'consultation.pdf'}
+
+
 def _state(text: str):
     return {
         'session_id': 's',
@@ -44,7 +50,7 @@ def _completion(message: dict, finish_reason: str) -> httpx.Response:
     )
 
 
-def _tool_call_response(query: str) -> httpx.Response:
+def _tool_call_response(name: str, arguments: dict) -> httpx.Response:
     return _completion(
         {
             'role': 'assistant',
@@ -54,8 +60,8 @@ def _tool_call_response(query: str) -> httpx.Response:
                     'id': 'call_1',
                     'type': 'function',
                     'function': {
-                        'name': 'vera_rag_kb',
-                        'arguments': json.dumps({'query': query}),
+                        'name': name,
+                        'arguments': json.dumps(arguments),
                     },
                 }
             ],
@@ -69,8 +75,15 @@ def _direct_response(content: str) -> httpx.Response:
 
 
 async def test_returns_tool_call_message_when_tool_needed():
-    chat_model = chat_model_with_handler(lambda request: _tool_call_response('квота'), streaming=False)
-    node = create_analyze_intent_node(chat_model, vera_rag_kb)
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response('vera_rag_kb', {'query': 'квота'}),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+    )
 
     trace_data = AgentRequestTraceData()
     token = set_request_trace(trace_data)
@@ -93,7 +106,11 @@ async def test_returns_empty_update_when_tool_not_needed():
     ответ пользователю формирует отдельный вызов generate_direct (раздел
     0.1)."""
     chat_model = chat_model_with_handler(lambda request: _direct_response('Привет! Чем могу помочь?'), streaming=False)
-    node = create_analyze_intent_node(chat_model, vera_rag_kb)
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+    )
 
     trace_data = AgentRequestTraceData()
     token = set_request_trace(trace_data)
@@ -104,4 +121,36 @@ async def test_returns_empty_update_when_tool_not_needed():
 
     assert result == {}
     assert trace_data.route == 'direct'
+    assert trace_data.search_required is False
+
+
+async def test_routes_explicit_consultation_email_request_to_mutating_tool():
+    arguments = {
+        'consultation_text': 'Итоговая консультация без предварительного форматирования.',
+        'email': 'user@example.com',
+    }
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response(
+            'send_consultation_email',
+            arguments,
+        ),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state('Отправь консультацию на user@example.com'))
+    finally:
+        reset_request_trace(token)
+
+    ai_message = result['messages'][0]
+    assert ai_message.tool_calls[0]['name'] == 'send_consultation_email'
+    assert ai_message.tool_calls[0]['args'] == arguments
+    assert trace_data.route == 'consultation_email'
     assert trace_data.search_required is False

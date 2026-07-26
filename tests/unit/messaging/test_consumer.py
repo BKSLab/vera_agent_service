@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.messaging.consumer import AgentRequestConsumer
+from app.observability.request_trace import get_request_trace
 
 
 class _FakeMessage:
@@ -40,6 +41,22 @@ class _FakeGraph:
                 if isinstance(item, Exception):
                     raise item
                 yield item
+
+        return _generator()
+
+
+class _MutatingFailureGraph:
+    def __init__(self):
+        self.call_count = 0
+
+    def astream_events(self, state, config, version='v2'):
+        self.call_count += 1
+
+        async def _generator():
+            trace_data = get_request_trace()
+            trace_data.mutating_tool_called = True
+            raise RuntimeError('LLM failed after email tool call')
+            yield
 
         return _generator()
 
@@ -244,4 +261,33 @@ async def test_failure_after_streaming_started_does_not_retry_and_acks():
     assert sink.calls == [
         ('r1', {'type': 'token', 'content': 'Начало ответа'}),
         ('r1', {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'}),
+    ]
+
+
+async def test_failure_after_mutating_tool_call_never_retries_and_acks():
+    """Даже без отправленного SSE-токена весь граф нельзя повторять после
+    вызова email-тулы: письмо могло быть принято до последующего сбоя."""
+    graph = _MutatingFailureGraph()
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink, retries=3)
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "message": "send"}'
+    )
+
+    await consumer._handle_message(message)
+
+    assert graph.call_count == 1
+    assert message.acked
+    assert message.nacked_requeue is None
+    assert sink.calls == [
+        (
+            'r1',
+            {
+                'type': 'error',
+                'detail': (
+                    'Не удалось подтвердить результат отправки консультации. '
+                    'Проверьте почту перед новой попыткой.'
+                ),
+            },
+        )
     ]

@@ -1,3 +1,4 @@
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from app.graph.edges import route_after_analyze_intent
@@ -21,6 +22,35 @@ def test_routes_to_call_kb_search_when_tool_calls_present():
     )
     state = _state([HumanMessage(content='квота?'), ai_message])
     assert route_after_analyze_intent(state) == 'call_kb_search'
+
+
+def test_routes_to_consultation_email_node():
+    ai_message = AIMessage(
+        content='',
+        tool_calls=[
+            {
+                'id': 'call_2',
+                'name': 'send_consultation_email',
+                'args': {
+                    'consultation_text': 'Текст консультации',
+                    'email': 'user@example.com',
+                },
+            }
+        ],
+    )
+    state = _state([HumanMessage(content='отправь'), ai_message])
+    assert route_after_analyze_intent(state) == 'call_consultation_email'
+
+
+def test_unknown_tool_call_is_rejected():
+    ai_message = AIMessage(
+        content='',
+        tool_calls=[{'id': 'call_3', 'name': 'unknown_tool', 'args': {}}],
+    )
+    state = _state([HumanMessage(content='вызови'), ai_message])
+
+    with pytest.raises(ValueError, match='unknown_tool'):
+        route_after_analyze_intent(state)
 
 
 def test_routes_to_generate_direct_when_no_tool_calls_were_added():

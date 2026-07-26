@@ -16,6 +16,9 @@ class AgentRequestTraceData:
     response_chunk_count: int = 0
     response_char_count: int = 0
     streaming_started: bool = False
+    mutating_tool_called: bool = False
+    consultation_email_status: str | None = None
+    consultation_email_error_code: str | None = None
     outcome: str = 'unknown'
 
 

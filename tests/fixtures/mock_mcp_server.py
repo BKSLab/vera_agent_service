@@ -1,7 +1,8 @@
 """Мок MCP Tools Server для тестов и локальной разработки Agent Service.
 
 Этот модуль поднимает минимальный, но настоящий (не замоканный на уровне
-HTTP-транспорта) сервер с единственным тулом `vera_rag_kb`, чтобы
+HTTP-транспорта) сервер с тулами `vera_rag_kb` и
+`send_consultation_email`, чтобы
 `app/clients/mcp_client.py` можно было протестировать против реального
 MCP-протокола (streamable-http) без обращения к развёрнутому сервису.
 
@@ -29,8 +30,12 @@ def create_mock_mcp_app(
     *,
     fail_message: str | None = None,
     delay_seconds: float = 0.0,
+    consultation_result: dict | None = None,
+    consultation_fail_message: str | None = None,
+    consultation_delay_seconds: float = 0.0,
+    consultation_requests: list[dict] | None = None,
 ) -> Starlette:
-    """Создаёт ASGI-приложение мок-сервера с тулом `vera_rag_kb`.
+    """Создаёт ASGI-приложение мок-сервера с двумя production-схемами тулов.
 
     Args:
         chunks: чанки, которые вернёт `vera_rag_kb` в поле `chunks` ответа
@@ -41,6 +46,10 @@ def create_mock_mcp_app(
             недоступны).
         delay_seconds: задержка перед ответом — имитация медленного
             RAG Service, для тестов таймаута на стороне клиента.
+        consultation_result: бизнес-словарь email-тулы.
+        consultation_fail_message: исключение email-тулы до результата.
+        consultation_delay_seconds: задержка мутирующей тулы.
+        consultation_requests: внешний список для фиксации точных аргументов.
     """
     mcp = FastMCP('vera-tools-mock', stateless_http=True)
 
@@ -52,6 +61,30 @@ def create_mock_mcp_app(
         if fail_message is not None:
             raise RuntimeError(fail_message)
         return {'chunks': chunks or []}
+
+    @mcp.tool()
+    async def send_consultation_email(
+        consultation_text: str,
+        email: str,
+    ) -> dict:
+        """Формирование PDF и отправка консультации по email (мок)."""
+        if consultation_requests is not None:
+            consultation_requests.append(
+                {
+                    'consultation_text': consultation_text,
+                    'email': email,
+                }
+            )
+        if consultation_delay_seconds:
+            await asyncio.sleep(consultation_delay_seconds)
+        if consultation_fail_message is not None:
+            raise RuntimeError(consultation_fail_message)
+        return consultation_result or {
+            'status': 'ok',
+            'email': email,
+            'document_name': 'konsultatsiya-vera-test.pdf',
+            'message': 'Консультация успешно отправлена.',
+        }
 
     return mcp.streamable_http_app()
 
