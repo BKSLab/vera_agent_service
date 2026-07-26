@@ -97,8 +97,6 @@ class ObservabilitySettings(SettingsBase):
     phoenix_enabled: bool = True
     phoenix_otlp_endpoint: str = 'http://localhost:6006/v1/traces'
     phoenix_project_name: str = 'vera-local'
-    phoenix_capture_content: bool = False
-    phoenix_content_max_chars: int = Field(default=12_000, ge=1)
 
 
 class Settings(BaseSettings):

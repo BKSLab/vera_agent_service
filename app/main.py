@@ -60,7 +60,6 @@ async def lifespan(app: FastAPI):
                 dlq_name=settings.rabbitmq.rabbitmq_dlq,
                 graph=graph,
                 token_sink=session_bus.publish,
-                observability_settings=settings.observability,
             )
             logger.info('🚀 Подключение к RabbitMQ...')
             await asyncio.wait_for(consumer.start(), timeout=STARTUP_TIMEOUT_SECONDS)

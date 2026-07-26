@@ -162,17 +162,13 @@ def _finished_span(name: str):
     return next(span for span in _exporter.get_finished_spans() if span.name == name)
 
 
-def _build_consumer(graph, capture: bool = False, max_chars: int = 12_000):
+def _build_consumer(graph):
     return AgentRequestConsumer(
         connection_url='amqp://unused',
         queue_name='agent.requests',
         dlq_name='agent.requests.dlq',
         graph=graph,
         token_sink=_noop_sink,
-        observability_settings=ObservabilitySettings(
-            phoenix_capture_content=capture,
-            phoenix_content_max_chars=max_chars,
-        ),
     )
 
 
@@ -181,6 +177,10 @@ async def test_tool_call_creates_logical_span_with_aggregates():
 
     span = _finished_span('tool.vera_rag_kb')
     assert span.attributes['openinference.span.kind'] == 'TOOL'
+    assert span.attributes['input.value'] == '{"query": "q"}'
+    assert span.attributes['input.mime_type'] == 'application/json'
+    assert span.attributes['output.value'] == '{"chunks": []}'
+    assert span.attributes['output.mime_type'] == 'application/json'
     assert span.attributes['tool.retry.count'] == 0
     assert span.attributes['tool.outcome'] == 'empty'
 
@@ -193,14 +193,14 @@ async def test_publish_many_tokens_does_not_create_sse_spans():
     assert not [span for span in _exporter.get_finished_spans() if span.name == 'sse.deliver']
 
 
-async def test_message_creates_one_agent_root_with_safe_direct_attributes():
+async def test_message_creates_one_agent_root_with_full_content():
     graph = _FakeGraph(
         [
             _stream_event('A'),
             _stream_event('Б'),
         ]
     )
-    consumer = _build_consumer(graph, capture=False)
+    consumer = _build_consumer(graph)
 
     await consumer._handle_message(_FakeMessage())
 
@@ -213,13 +213,13 @@ async def test_message_creates_one_agent_root_with_safe_direct_attributes():
     assert span.attributes['agent.response.chunk_count'] == 2
     assert span.attributes['agent.response.char_count'] == 2
     assert span.attributes['agent.outcome'] == 'done'
-    assert 'input.value' not in span.attributes
-    assert 'output.value' not in span.attributes
+    assert span.attributes['input.value'] == 'question'
+    assert span.attributes['output.value'] == 'AБ'
 
 
-async def test_capture_contains_only_current_message_and_truncated_final_output():
+async def test_root_contains_full_current_message_and_final_output():
     graph = _FakeGraph([_stream_event('123456')])
-    consumer = _build_consumer(graph, capture=True, max_chars=5)
+    consumer = _build_consumer(graph)
 
     await consumer._handle_message(
         _FakeMessage(
@@ -230,12 +230,10 @@ async def test_capture_contains_only_current_message_and_truncated_final_output(
     span = _finished_span('vera.agent.request')
     assert span.attributes['session.id'] == 's1'
     assert span.attributes['request.id'] == 'r1'
-    assert span.attributes['input.value'] == 'quest'
+    assert span.attributes['input.value'] == 'question'
     assert span.attributes['input.mime_type'] == 'text/plain'
-    assert span.attributes['input.truncated'] is True
-    assert span.attributes['output.value'] == '12345'
+    assert span.attributes['output.value'] == '123456'
     assert span.attributes['output.mime_type'] == 'text/plain'
-    assert span.attributes['output.truncated'] is True
     assert span.attributes['agent.input.char_count'] == 8
     assert span.attributes['agent.response.char_count'] == 6
     assert span.attributes['user.authenticated'] is True
@@ -284,7 +282,7 @@ async def test_retry_before_streaming_resets_output_and_is_counted():
             [_stream_event('final')],
         ]
     )
-    consumer = _build_consumer(graph, capture=True)
+    consumer = _build_consumer(graph)
 
     await consumer._handle_message(_FakeMessage())
 
@@ -305,7 +303,7 @@ async def test_error_after_first_token_is_terminal_root_error_without_retry():
             ]
         ]
     )
-    consumer = _build_consumer(graph, capture=True)
+    consumer = _build_consumer(graph)
 
     message = _FakeMessage()
     await consumer._handle_message(message)
@@ -393,15 +391,15 @@ def test_exporter_uses_phoenix_project_header(monkeypatch):
     }
 
 
-def test_langchain_auto_spans_never_capture_conversation_content():
+def test_langchain_auto_spans_capture_full_conversation_content():
     config = _create_langchain_trace_config()
 
-    assert config.hide_inputs is True
-    assert config.hide_outputs is True
-    assert config.hide_input_messages is True
-    assert config.hide_output_messages is True
-    assert config.hide_prompts is True
-    assert config.hide_choices is True
+    assert config.hide_inputs is False
+    assert config.hide_outputs is False
+    assert config.hide_input_messages is False
+    assert config.hide_output_messages is False
+    assert config.hide_prompts is False
+    assert config.hide_choices is False
 
 
 def test_disabled_phoenix_does_not_create_exporter(monkeypatch):

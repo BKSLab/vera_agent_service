@@ -10,7 +10,6 @@ from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttribu
 from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
-from app.core.settings import ObservabilitySettings
 from app.exceptions.messaging import InvalidAgentRequestError
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import (
@@ -91,7 +90,6 @@ class AgentRequestConsumer:
         token_sink: TokenSink,
         retries: int = DEFAULT_RETRIES,
         prefetch_count: int = 1,
-        observability_settings: ObservabilitySettings | None = None,
     ):
         self._connection_url = connection_url
         self._queue_name = queue_name
@@ -100,7 +98,6 @@ class AgentRequestConsumer:
         self._token_sink = token_sink
         self._retries = retries
         self._prefetch_count = prefetch_count
-        self._observability_settings = observability_settings or ObservabilitySettings()
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
         self._queue: aio_pika.abc.AbstractQueue | None = None
@@ -182,11 +179,10 @@ class AgentRequestConsumer:
         span.set_attribute('request.id', payload.request_id)
         span.set_attribute('user.authenticated', payload.user_id is not None)
         span.set_attribute('agent.input.char_count', len(payload.message))
-        self._set_captured_content(
+        self._set_content(
             span,
             SpanAttributes.INPUT_VALUE,
             SpanAttributes.INPUT_MIME_TYPE,
-            'input.truncated',
             payload.message,
         )
 
@@ -209,11 +205,10 @@ class AgentRequestConsumer:
                 await self._token_sink(payload.request_id, {'type': 'done'})
                 await message.ack()
                 trace_data.outcome = 'degraded' if trace_data.search_unavailable else 'done'
-                self._set_captured_content(
+                self._set_content(
                     span,
                     SpanAttributes.OUTPUT_VALUE,
                     SpanAttributes.OUTPUT_MIME_TYPE,
-                    'output.truncated',
                     ''.join(response_chunks),
                 )
                 return
@@ -232,11 +227,10 @@ class AgentRequestConsumer:
                     )
                     await message.ack()
                     trace_data.outcome = 'error'
-                    self._set_captured_content(
+                    self._set_content(
                         span,
                         SpanAttributes.OUTPUT_VALUE,
                         SpanAttributes.OUTPUT_MIME_TYPE,
-                        'output.truncated',
                         ''.join(response_chunks),
                     )
                     _mark_span_error(span, error)
@@ -273,21 +267,15 @@ class AgentRequestConsumer:
         if last_error is not None:
             _mark_span_error(span, last_error)
 
-    def _set_captured_content(
-        self,
+    @staticmethod
+    def _set_content(
         span: Span,
         value_attribute: str,
         mime_type_attribute: str,
-        truncated_attribute: str,
         content: str,
     ) -> None:
-        if not self._observability_settings.phoenix_capture_content:
-            return
-        max_chars = self._observability_settings.phoenix_content_max_chars
-        span.set_attribute(value_attribute, content[:max_chars])
+        span.set_attribute(value_attribute, content)
         span.set_attribute(mime_type_attribute, 'text/plain')
-        if len(content) > max_chars:
-            span.set_attribute(truncated_attribute, True)
 
     @staticmethod
     def _finalize_root_span(span: Span, trace_data: AgentRequestTraceData) -> None:

@@ -49,8 +49,6 @@ vera.agent.request
 PHOENIX_ENABLED=true
 PHOENIX_OTLP_ENDPOINT=http://localhost:6006/v1/traces
 PHOENIX_PROJECT_NAME=vera-local
-PHOENIX_CAPTURE_CONTENT=false
-PHOENIX_CONTENT_MAX_CHARS=12000
 ```
 
 Рекомендуемые имена проектов:
@@ -83,35 +81,21 @@ Phoenix 15.5.0+ поддерживает `x-project-name` для OTLP/HTTP; ис
 
 Последний пункт критичен для Agent Service: статические `headers` в конфигурации `MultiServerMCPClient` нельзя заполнять текущим trace-контекстом при создании клиента — клиент живёт дольше одного запроса. Нужен динамический `ToolCallInterceptor`, который добавляет заголовки непосредственно перед каждым MCP tool call.
 
-### 2.3. Приватность input/output
+### 2.3. Полный input/output
 
-В Agent Service добавить:
-
-```dotenv
-PHOENIX_CAPTURE_CONTENT=false
-PHOENIX_CONTENT_MAX_CHARS=12000
-```
-
-Политика:
-
-- `false` — production-safe режим по умолчанию: сохраняются длины, статусы, счётчики и технические атрибуты, но не тексты вопроса/ответа;
-- `true` — разрешён только для контура, где доступ к self-hosted Phoenix ограничен и хранение пользовательского текста явно принято владельцем данных;
-- для локальной/E2E-проверки читаемости Phoenix временно включать `true`; production оставлять `false`, пока владелец данных явно не утвердит хранение текстов;
-- даже при `true` не экспортировать API-ключи, системные промпты, полную историю диалога, содержимое Redis state и внутренние сообщения инструментов;
-- автоматические LangChain/OpenInference spans всегда создаются с `TraceConfig`, скрывающим inputs, outputs, prompts и messages; `PHOENIX_CAPTURE_CONTENT` разрешает текст только на ручном корневом `vera.agent.request`;
-- `user_id` не экспортировать в открытом виде; достаточно `user.authenticated: bool`;
-- `session.id` разрешить как span-атрибут для поиска конкретного диалога, но не делать resource-атрибутом;
-- RAG Service не должен повторно сохранять полный query и тексты найденных чанков в Phoenix: при разрешённом capture они уже видны на корневом Agent-span, а подробный журнал поиска хранится в защищённой таблице `search_logs`.
-- input/output обрезать до `PHOENIX_CONTENT_MAX_CHARS`; факт обрезки явно отмечать `input.truncated=true`/`output.truncated=true`, а исходную длину сохранять отдельным числовым атрибутом.
-
-При `PHOENIX_CAPTURE_CONTENT=true` корневой span получает:
+Agent Service всегда экспортирует observability-контент без отдельного
+capture-флага:
 
 - `input.value` — только новое сообщение пользователя;
 - `input.mime_type=text/plain`;
 - `output.value` — только финальный текст ответа пользователю;
-- `output.mime_type=text/plain`.
+- `output.mime_type=text/plain`;
+- LangChain/OpenInference spans — полные inputs, outputs, системные промпты,
+  история сообщений и choices;
+- tool spans — полные JSON-аргументы и JSON-результаты.
 
-Настройка capture не должна менять функциональный ответ, SSE-поток или содержимое Redis: она управляет только экспортируемыми span attributes.
+`session.id` остаётся span-атрибутом для группировки запросов одного диалога.
+Экспорт не меняет функциональный ответ, SSE-поток или содержимое Redis.
 
 ### 2.4. Статусы
 
@@ -164,8 +148,6 @@ Fallback не должен окрашивать весь trace как авари
 
 Условные атрибуты:
 
-- `input.value`/`output.value` — только при `PHOENIX_CAPTURE_CONTENT=true`;
-- `input.truncated`/`output.truncated` — только если сработал лимит `PHOENIX_CONTENT_MAX_CHARS`;
 - `error.type` и exception event — только при реальной ошибке;
 - `agent.mcp.retry_count` — если MCP пришлось повторять;
 - `agent.streaming.started` — помогает отличить retry до стриминга от ошибки после начала стриминга.
@@ -235,10 +217,10 @@ Span представляет логический вызов инструмен
 
 Правки:
 
-- [x] Расширить `ObservabilitySettings` полями `phoenix_enabled`, `phoenix_project_name`, `phoenix_capture_content`, `phoenix_content_max_chars`.
+- [x] Расширить `ObservabilitySettings` полями `phoenix_enabled` и `phoenix_project_name`.
 - [x] Сохранить существующий `phoenix_otlp_endpoint`.
-- [x] В `.env.example` описать одинаковые project names для трёх сервисов и privacy-режим.
-- [x] В Compose оставить endpoint `http://phoenix:6006/v1/traces`, добавить project name и capture mode через environment/env_file.
+- [x] В `.env.example` описать одинаковые project names для трёх сервисов.
+- [x] В Compose оставить endpoint `http://phoenix:6006/v1/traces` и добавить project name.
 - [x] Не добавлять `depends_on: phoenix` к Agent Service.
 
 ### 4.2. Инициализация и завершение tracing
@@ -374,9 +356,9 @@ class AgentRequestTraceData:
 - [x] MCP unavailable: outcome `degraded`, а не terminal ERROR.
 - [x] Retry до стриминга отражён в `agent.retry.count`.
 - [x] Ошибка после первого токена не запускает повтор и помечает root ERROR.
-- [x] При capture=false отсутствуют `input.value` и `output.value`.
-- [x] При capture=true они содержат только новое сообщение и финальный ответ.
-- [x] Контент длиннее лимита обрезается, а `*.truncated` и исходная длина заполнены корректно.
+- [x] Root содержит полное новое сообщение и полный финальный ответ.
+- [x] LangChain spans содержат промпты, историю, inputs и outputs.
+- [x] Tool span содержит полные JSON-аргументы и результат.
 - [x] Повтор до начала стриминга не смешивает буферы output двух попыток.
 - [x] N токенов не создают N `sse.deliver` spans.
 - [x] MCP interceptor добавляет валидный `traceparent`.
@@ -482,7 +464,7 @@ RAG подключается к Phoenix не для показа отдельн�
 
 - [x] Добавить согласованные версии `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`.
 - [x] Добавить `ObservabilitySettings` с endpoint, enabled и project name.
-- [x] Не добавлять `PHOENIX_CAPTURE_CONTENT`: RAG по принятой политике не экспортирует пользовательский query/chunk text независимо от Agent-настройки.
+- [x] Не добавлять отдельный переключатель содержимого: observability-контент экспортируется всегда.
 - [x] Настроить доступ контейнера к общему Phoenix через существующую production/local топологию.
 - [x] Не поднимать собственный Phoenix.
 
@@ -652,7 +634,7 @@ RAG подключается к Phoenix не для показа отдельн�
 | Сервис | Проверка | Критерий |
 |---|---|---|
 | Agent | root span | один `vera.agent.request` |
-| Agent | content policy | текст есть только при capture=true |
+| Agent | content policy | полный контент root, LLM и tool spans |
 | Agent | SSE | N chunks не создают N spans |
 | Agent | MCP injection | валидный динамический `traceparent` |
 | MCP | extraction | trace id совпал с переданным |
@@ -738,8 +720,6 @@ parent span
    - последние завершённые traces появляются в Phoenix после stop;
    - в логах нет необработанной ошибки flush.
 
-Для сценария проверки input/output локальный/E2E-контур запускается с `PHOENIX_CAPTURE_CONTENT=true` и тестовыми данными без персональной информации. Отдельно повторить запрос с `false` и подтвердить отсутствие текстов.
-
 ### 10.5. Проверка в Phoenix
 
 - [ ] Открыть project текущего окружения (`vera-local`/`vera-testing`/`vera-production`).
@@ -747,7 +727,7 @@ parent span
 - [ ] Убедиться, что сверху виден `vera.agent.request`, а не технический span.
 - [ ] Убедиться, что Agent/MCP/RAG находятся в одном trace и различаются по `service.name`.
 - [ ] Убедиться, что на один ответ отсутствуют десятки `sse.deliver`.
-- [ ] Проверить input/output в разрешённом окружении и их отсутствие при capture=false.
+- [ ] Проверить полные root/LLM/tool input и output.
 - [ ] Проверить, что `/health` и `/metrics` не засоряют AI project.
 - [ ] Сравнить количество spans до/после на одинаковом запросе.
 
@@ -881,7 +861,7 @@ tests/api/endpoints/test_request_id.py
 - [ ] Убедиться, что RAG Service штатно поднимает Postgres/Qdrant, применяет миграции и содержит хотя бы один тестовый документ. Если снова возникает `InvalidCatalogNameError`, сначала восстановить провижининг БД — без этого сценарий с результатом поиска непроверяем.
 - [ ] Проверить общую Docker-сеть `vera_network` и DNS-имена контейнеров Agent/MCP/RAG/Phoenix.
 - [ ] Задать во всех трёх процессах одинаковые `PHOENIX_OTLP_ENDPOINT` и `PHOENIX_PROJECT_NAME=vera-local`; оставить разные `service.name`.
-- [ ] Для основного privacy-прогона установить `PHOENIX_CAPTURE_CONTENT=false`; для отдельного content-прогона использовать `true` только с синтетическим текстом без персональных данных.
+- [ ] Убедиться, что Phoenix доступен только в предусмотренном окружении.
 
 ### 15.2. Регрессия на реальной инфраструктуре
 
@@ -896,7 +876,7 @@ tests/api/endpoints/test_request_id.py
 - [ ] Выполнить восемь сценариев раздела 10.4, включая empty, degraded, RAG unavailable, ошибку после начала SSE и две параллельные сессии.
 - [ ] В Phoenix найти запрос по `session.id` и зафиксировать `trace_id`, span ids и `service.name` дерева `vera.agent.request → tool.vera_rag_kb → mcp.execute.vera_rag_kb → rag.search`.
 - [ ] Подтвердить, что прямой ответ не содержит MCP/RAG spans, а SSE не создаёт per-token `sse.deliver`.
-- [ ] Подтвердить privacy в двух режимах: при capture=false нет input/output; при capture=true синтетические input/output есть только на разрешённом Agent root. В MCP/RAG query/chunk text отсутствует в обоих режимах.
+- [ ] Подтвердить наличие полного input/output на Agent root, LLM и tool spans.
 - [ ] Подтвердить, что `/health` и `/metrics` не засоряют AI project.
 - [ ] Штатно остановить три процесса и убедиться, что последние завершённые spans появились в Phoenix, а в логах нет ошибки flush/shutdown.
 

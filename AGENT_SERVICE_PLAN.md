@@ -315,7 +315,7 @@ vera_agent_service/
 - [x] 9.2 Один корневой `vera.agent.request` на полный lifecycle сообщения. На нём агрегируются `session.id`, маршрут, наличие/результат поиска, число чанков, outcome, retry и SSE-счётчики.
 - [x] 9.3 Ручная граница поиска `tool.vera_rag_kb`; per-token `sse.deliver` удалён. Вызовы LLM/LangGraph остаются под автоинструментацией.
 - [x] 9.4 Динамическая W3C-инъекция контекста Agent → MCP. Продолжение дерева в MCP и RAG реализовано в соседних сервисах.
-- [x] 9.5 Privacy policy: input/output корневого span разрешены только при `PHOENIX_CAPTURE_CONTENT=true`; MCP/RAG не получают это разрешение и не экспортируют пользовательский контент.
+- [x] 9.5 Полный observability-контент: root, LangChain/LangGraph и tool spans экспортируют входы, выходы, промпты, историю и параметры вызовов без отдельного capture-флага.
 
 **Definition of Done на уровне кода:** один запрос создаёт компактный корневой span, сетевой вызов MCP получает актуальный `traceparent`, SSE не размножает spans, а штатная остановка отправляет накопленный batch. Это подтверждено unit/contract-тестами с in-memory exporter и реальным streamable-http тестовым сервером.
 

@@ -18,22 +18,8 @@ _shutdown = False
 
 
 def _create_langchain_trace_config() -> TraceConfig:
-    """Не позволяет автоинструментации экспортировать содержимое диалога.
-
-    `PHOENIX_CAPTURE_CONTENT` относится только к ручному корневому span
-    `vera.agent.request`: там текст нового вопроса и финального ответа
-    обрезается и добавляется осознанно. LangChain spans видят system prompt,
-    полную историю и внутренние ToolMessage, поэтому их input/output скрыты
-    всегда — в том числе при разрешённом capture на корне.
-    """
-    return TraceConfig(
-        hide_inputs=True,
-        hide_outputs=True,
-        hide_input_messages=True,
-        hide_output_messages=True,
-        hide_prompts=True,
-        hide_choices=True,
-    )
+    """Экспортирует полное содержимое LangChain/LangGraph spans в Phoenix."""
+    return TraceConfig()
 
 
 def configure_tracing(settings: ObservabilitySettings) -> TracerProvider:

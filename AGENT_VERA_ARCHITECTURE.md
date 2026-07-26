@@ -524,7 +524,7 @@ Phoenix подключается через OpenTelemetry-совместимые
 - Agent Service использует `openinference-instrumentation-langchain` и ручные продуктовые границы.
 - Agent, MCP и RAG экспортируют в один project (`PHOENIX_PROJECT_NAME`), но с разными `service.name`.
 - Единый Phoenix instance/project сам по себе не объединяет spans. Один trace получается благодаря динамической передаче W3C `traceparent` на переходах Agent → MCP → RAG.
-- Текст входа/выхода допускается только на корневом Agent span при `PHOENIX_CAPTURE_CONTENT=true`. MCP и RAG не экспортируют query, промпты, тексты чанков и embedding-векторы.
+- Agent экспортирует полный текст входа/выхода, промпты, историю и содержимое tool spans. Полное дерево Agent → MCP → RAG сохраняется без фильтрации spans.
 - На штатной остановке каждый процесс вызывает `force_flush`, затем завершает tracer provider.
 
 ### Self-hosted деплой
