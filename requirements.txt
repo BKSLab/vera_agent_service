@@ -23,6 +23,8 @@ langgraph-checkpoint-redis==0.5.0
 langchain-core==1.4.9
 langchain-openai==1.3.4
 langchain-mcp-adapters==0.3.0
+# MCP 2.x несовместим с langchain-mcp-adapters 0.3.0: удалён RequestContext.
+mcp==1.28.1
 
 # Очередь и checkpointer
 aio-pika==9.6.2
