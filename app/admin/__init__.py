@@ -8,6 +8,7 @@ from app.admin.auth import AdminLoginAuth
 from app.admin.views import (
     ChatSessionAdmin,
     ChatTurnAdmin,
+    DialogueSearchView,
     MessageFeedbackAdmin,
     SessionDetailView,
     SessionFeedbackAdmin,
@@ -35,5 +36,6 @@ def create_admin(app: FastAPI, engine: AsyncEngine) -> Admin:
     admin.add_view(ChatTurnAdmin)
     admin.add_view(MessageFeedbackAdmin)
     admin.add_view(SessionFeedbackAdmin)
+    admin.add_view(DialogueSearchView)
     admin.add_view(SessionDetailView)
     return admin

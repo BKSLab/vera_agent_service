@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
@@ -8,18 +9,36 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from starlette.requests import Request
 
+from app.admin.services import build_dialogue_search_service
 from app.core.settings import get_settings
 from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import ChatTurn
 from app.db.models.message_feedback import MessageFeedback
 from app.db.models.session_feedback import SessionFeedback
 from app.db.session import async_session_factory
+from app.exceptions.dialogue_search import DialogueSearchServiceError
 
 REVIEW_STATUS_CHOICES = [
     ('new', 'Новый'),
     ('in_review', 'На проверке'),
     ('resolved', 'Решён'),
     ('dismissed', 'Отклонён'),
+]
+TURN_STATUS_CHOICES = [
+    ('processing', 'В обработке'),
+    ('completed', 'Завершён'),
+    ('failed', 'Ошибка'),
+    ('delivery_unconfirmed', 'Доставка не подтверждена'),
+]
+RATING_CHOICES = [
+    ('up', 'Положительная'),
+    ('down', 'Отрицательная'),
+    ('none', 'Без оценки'),
+]
+AUDIENCE_CHOICES = [
+    ('seeker', 'Соискатель'),
+    ('employer', 'Работодатель'),
+    ('other', 'Другая'),
 ]
 
 
@@ -47,6 +66,24 @@ def _fmt_json(model: Any, attr: str) -> Markup:
 def _session_link(session_id: str) -> Markup:
     query = urlencode({'session_id': session_id})
     return Markup(f'<a href="/admin/session-detail?{query}">{escape(session_id)}</a>')
+
+
+def _session_detail_url(session_id: str, request_id: str | None = None) -> str:
+    params = {'session_id': session_id}
+    if request_id:
+        params['request_id'] = request_id
+    return f'/admin/session-detail?{urlencode(params)}'
+
+
+def _parse_filter_date(value: str, *, end_of_day: bool = False) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError('Дата должна быть указана в формате ГГГГ-ММ-ДД.') from error
+    result = datetime.combine(parsed, time.min, tzinfo=UTC)
+    return result + timedelta(days=1) if end_of_day else result
 
 
 def _fmt_session_id(model: ChatSession, attr: str) -> Markup:
@@ -140,7 +177,7 @@ class ChatTurnAdmin(ModelView, model=ChatTurn):
         ChatTurn.completed_at,
         ChatTurn.latency_ms,
     ]
-    column_searchable_list = [ChatTurn.request_id, ChatTurn.question, ChatTurn.answer]
+    column_searchable_list = [ChatTurn.request_id]
     column_sortable_list = [ChatTurn.created_at, ChatTurn.completed_at, ChatTurn.latency_ms]
     column_default_sort = [(ChatTurn.created_at, True)]
     column_formatters = {
@@ -253,7 +290,7 @@ class SessionFeedbackAdmin(ModelView, model=SessionFeedback):
         SessionFeedback.created_at,
         SessionFeedback.updated_at,
     ]
-    column_searchable_list = [SessionFeedback.submission_id, SessionFeedback.comment]
+    column_searchable_list = [SessionFeedback.submission_id]
     column_sortable_list = [
         SessionFeedback.created_at,
         SessionFeedback.review_status,
@@ -320,4 +357,80 @@ class SessionDetailView(BaseView):
                 'session_id': session_id,
                 'request_id': request_id,
             },
+        )
+
+
+class DialogueSearchView(BaseView):
+    """Полнотекстовый поиск по постоянному архиву диалогов и отзывов."""
+
+    name = 'Поиск по диалогам'
+    icon = 'fa-solid fa-magnifying-glass'
+
+    @expose('/dialogue-search', methods=['GET'])
+    async def dialogue_search(self, request: Request) -> Any:
+        search_query = (request.query_params.get('query') or '').strip()
+        turn_status = (request.query_params.get('status') or '').strip()
+        rating = (request.query_params.get('rating') or '').strip()
+        audience = (request.query_params.get('audience') or '').strip()
+        date_from = (request.query_params.get('date_from') or '').strip()
+        date_to = (request.query_params.get('date_to') or '').strip()
+
+        context: dict[str, Any] = {
+            'query': search_query,
+            'selected_status': turn_status,
+            'selected_rating': rating,
+            'selected_audience': audience,
+            'date_from': date_from,
+            'date_to': date_to,
+            'turn_status_choices': TURN_STATUS_CHOICES,
+            'rating_choices': RATING_CHOICES,
+            'audience_choices': AUDIENCE_CHOICES,
+            'session_detail_url': _session_detail_url,
+            'searched': False,
+        }
+        has_criteria = any(
+            (search_query, turn_status, rating, audience, date_from, date_to)
+        )
+        if not has_criteria:
+            return await self.templates.TemplateResponse(
+                request,
+                'dialogue_search.html',
+                context,
+            )
+
+        try:
+            allowed_statuses = {value for value, _ in TURN_STATUS_CHOICES}
+            allowed_ratings = {value for value, _ in RATING_CHOICES}
+            allowed_audiences = {value for value, _ in AUDIENCE_CHOICES}
+            if turn_status and turn_status not in allowed_statuses:
+                raise ValueError('Недопустимый статус реплики.')
+            if rating and rating not in allowed_ratings:
+                raise ValueError('Недопустимое значение оценки.')
+            if audience and audience not in allowed_audiences:
+                raise ValueError('Недопустимая аудитория.')
+
+            created_from = _parse_filter_date(date_from)
+            created_to = _parse_filter_date(date_to, end_of_day=True)
+            if created_from and created_to and created_from >= created_to:
+                raise ValueError('Дата начала периода должна быть не позже даты окончания.')
+
+            async with build_dialogue_search_service() as service:
+                context['results'] = await service.search(
+                    search_query=search_query or None,
+                    turn_status=turn_status or None,
+                    rating=rating or None,
+                    audience=audience or None,
+                    created_from=created_from,
+                    created_to=created_to,
+                )
+            context['searched'] = True
+        except ValueError as error:
+            context['error'] = str(error)
+        except DialogueSearchServiceError as error:
+            context['error'] = error.detail
+
+        return await self.templates.TemplateResponse(
+            request,
+            'dialogue_search.html',
+            context,
         )

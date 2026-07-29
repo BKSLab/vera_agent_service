@@ -1,12 +1,25 @@
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, literal_column, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import ChatTurn
+from app.db.models.message_feedback import MessageFeedback
+from app.db.models.session_feedback import SessionFeedback
 from app.exceptions.chat_turn import ChatTurnAlreadyExistsError, ChatTurnRepositoryError
+
+
+@dataclass(frozen=True)
+class RankedChatTurn:
+    """Реплика и её релевантность полнотекстовому запросу."""
+
+    chat_turn: ChatTurn
+    rank: float
 
 
 class ChatTurnRepository:
@@ -37,6 +50,66 @@ class ChatTurnRepository:
                 )
             ).scalar_one()
             return (current_max or 0) + 1
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatTurnRepositoryError(str(error)) from error
+
+    async def search(
+        self,
+        search_query: str | None,
+        turn_status: str | None,
+        rating: str | None,
+        audience: str | None,
+        created_from: datetime | None,
+        created_to: datetime | None,
+        limit: int,
+    ) -> list[RankedChatTurn]:
+        """Ищет реплики через PostgreSQL FTS и административные фильтры."""
+        try:
+            if search_query:
+                ts_query = func.websearch_to_tsquery(
+                    literal_column("'russian'::regconfig"),
+                    search_query,
+                )
+                rank = func.ts_rank_cd(ChatTurn.search_vector, ts_query)
+            else:
+                ts_query = None
+                rank = literal(0.0)
+
+            statement = (
+                select(ChatTurn, rank.label('rank'))
+                .options(selectinload(ChatTurn.feedback))
+                .order_by(rank.desc(), ChatTurn.created_at.desc())
+                .limit(limit)
+            )
+            if ts_query is not None:
+                statement = statement.where(ChatTurn.search_vector.op('@@')(ts_query))
+            if turn_status:
+                statement = statement.where(ChatTurn.status == turn_status)
+            if rating == 'none':
+                statement = statement.where(~ChatTurn.feedback.has())
+            elif rating:
+                statement = statement.where(
+                    ChatTurn.feedback.has(MessageFeedback.value == rating)
+                )
+            if audience:
+                statement = statement.where(
+                    ChatTurn.chat_session.has(
+                        ChatSession.feedback_entries.any(
+                            SessionFeedback.audience == audience
+                        )
+                    )
+                )
+            if created_from:
+                statement = statement.where(ChatTurn.created_at >= created_from)
+            if created_to:
+                statement = statement.where(ChatTurn.created_at < created_to)
+
+            rows = (await self.db_session.execute(statement)).unique().all()
+            return [
+                RankedChatTurn(chat_turn=chat_turn, rank=float(rank_value or 0))
+                for chat_turn, rank_value in rows
+            ]
         except SQLAlchemyError as error:
             await self.db_session.rollback()
             raise ChatTurnRepositoryError(str(error)) from error

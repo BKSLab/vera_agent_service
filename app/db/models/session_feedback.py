@@ -6,8 +6,10 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -15,7 +17,7 @@ from sqlalchemy import (
     Uuid,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base
@@ -40,6 +42,11 @@ class SessionFeedback(Base):
         UniqueConstraint(
             'submission_id',
             name='uq_vera_session_feedback_submission_id',
+        ),
+        Index(
+            'ix_vera_session_feedback_search_vector',
+            'search_vector',
+            postgresql_using='gin',
         ),
     )
 
@@ -87,6 +94,17 @@ class SessionFeedback(Base):
         nullable=True,
         doc='Комментарий пользователя.',
         comment='Свободный комментарий пользователя.',
+    )
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "to_tsvector('russian'::regconfig, coalesce(comment, ''))",
+            persisted=True,
+        ),
+        nullable=False,
+        deferred=True,
+        doc='Полнотекстовый индекс комментария.',
+        comment='Автоматически формируемый tsvector для русскоязычного поиска.',
     )
     contact_email: Mapped[str | None] = mapped_column(
         String(length=320),

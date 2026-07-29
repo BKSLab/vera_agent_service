@@ -1,0 +1,168 @@
+{% extends "sqladmin/layout.html" %}
+{% block content %}
+<div class="col-12">
+  <div class="card mb-3">
+    <div class="card-header">
+      <h3 class="card-title">Поиск по диалогам</h3>
+    </div>
+    <div class="card-body border-bottom py-3">
+      {% if error %}
+      <div class="alert alert-danger" role="alert">{{ error }}</div>
+      {% endif %}
+      <form method="GET" action="/admin/dialogue-search">
+        <div class="mb-3">
+          <label class="form-label">Текст вопроса, ответа или комментария</label>
+          <input
+            type="search"
+            name="query"
+            class="form-control"
+            value="{{ query }}"
+            placeholder="Например: оформление трудового договора"
+          >
+        </div>
+        <div class="row">
+          <div class="col-md-3 mb-3">
+            <label class="form-label">Статус реплики</label>
+            <select name="status" class="form-select">
+              <option value="">— любой —</option>
+              {% for value, label in turn_status_choices %}
+              <option value="{{ value }}" {% if selected_status == value %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3 mb-3">
+            <label class="form-label">Оценка ответа</label>
+            <select name="rating" class="form-select">
+              <option value="">— любая —</option>
+              {% for value, label in rating_choices %}
+              <option value="{{ value }}" {% if selected_rating == value %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3 mb-3">
+            <label class="form-label">Аудитория</label>
+            <select name="audience" class="form-select">
+              <option value="">— любая —</option>
+              {% for value, label in audience_choices %}
+              <option value="{{ value }}" {% if selected_audience == value %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-md-3 mb-3">
+            <label class="form-label">Период</label>
+            <div class="input-group">
+              <input type="date" name="date_from" class="form-control" value="{{ date_from }}" aria-label="Дата с">
+              <input type="date" name="date_to" class="form-control" value="{{ date_to }}" aria-label="Дата по">
+            </div>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary">Искать</button>
+        <a href="/admin/dialogue-search" class="btn btn-outline-secondary">Сбросить</a>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% if searched %}
+<div class="col-12">
+  <div class="card mb-3">
+    <div class="card-header">
+      <h3 class="card-title">Найденные реплики — {{ results.turns | length }}</h3>
+    </div>
+    <div class="card-body">
+      {% if results.turns %}
+      <div class="table-responsive">
+        <table class="table table-vcenter">
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Сессия / request_id</th>
+              <th>Вопрос</th>
+              <th>Ответ</th>
+              <th>Статус</th>
+              <th>Оценка</th>
+              {% if query %}<th>Релевантность</th>{% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in results.turns %}
+            {% set turn = row.chat_turn %}
+            <tr>
+              <td>{{ turn.created_at }}</td>
+              <td>
+                <a href="{{ session_detail_url(turn.chat_session.session_id, turn.request_id) }}">
+                  {{ turn.chat_session.session_id }}
+                </a>
+                <br><code>{{ turn.request_id }}</code>
+              </td>
+              <td style="max-width:320px;white-space:pre-wrap;">{{ turn.question }}</td>
+              <td style="max-width:420px;white-space:pre-wrap;">{{ turn.answer or '—' }}</td>
+              <td><span class="badge bg-secondary">{{ turn.status }}</span></td>
+              <td>
+                {% if turn.feedback %}
+                <span class="badge {% if turn.feedback.value == 'up' %}bg-success{% else %}bg-danger{% endif %}">
+                  {{ turn.feedback.value }}
+                </span>
+                {% else %}—{% endif %}
+              </td>
+              {% if query %}<td>{{ '%.4f' | format(row.rank) }}</td>{% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <em>Реплики не найдены.</em>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<div class="col-12">
+  <div class="card mb-3">
+    <div class="card-header">
+      <h3 class="card-title">Найденные комментарии — {{ results.comments | length }}</h3>
+    </div>
+    <div class="card-body">
+      {% if results.comments %}
+      <div class="table-responsive">
+        <table class="table table-vcenter">
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Сессия</th>
+              <th>Аудитория</th>
+              <th>Полезность</th>
+              <th>Доверие</th>
+              <th>Комментарий</th>
+              {% if query %}<th>Релевантность</th>{% endif %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in results.comments %}
+            {% set feedback = row.feedback %}
+            <tr>
+              <td>{{ feedback.created_at }}</td>
+              <td>
+                <a href="{{ session_detail_url(feedback.chat_session.session_id) }}">
+                  {{ feedback.chat_session.session_id }}
+                </a>
+              </td>
+              <td>{{ feedback.audience or '—' }}</td>
+              <td>{{ feedback.usefulness or '—' }}</td>
+              <td>{{ feedback.trust or '—' }}</td>
+              <td style="max-width:520px;white-space:pre-wrap;">{{ feedback.comment }}</td>
+              {% if query %}<td>{{ '%.4f' | format(row.rank) }}</td>{% endif %}
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <em>Комментарии не найдены.</em>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

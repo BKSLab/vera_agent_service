@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -15,7 +16,7 @@ from sqlalchemy import (
     Uuid,
     func,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base
@@ -38,6 +39,11 @@ class ChatTurn(Base):
         UniqueConstraint('request_id', name='uq_vera_chat_turns_request_id'),
         Index('ix_vera_chat_turns_session_sequence', 'chat_session_id', 'sequence_number'),
         Index('ix_vera_chat_turns_status_created_at', 'status', 'created_at'),
+        Index(
+            'ix_vera_chat_turns_search_vector',
+            'search_vector',
+            postgresql_using='gin',
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(
@@ -84,6 +90,18 @@ class ChatTurn(Base):
         nullable=True,
         doc='Фактически отправленный ответ.',
         comment='Конкатенация токенов финального ответа, отправленных через SSE.',
+    )
+    search_vector: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed(
+            "setweight(to_tsvector('russian'::regconfig, coalesce(question, '')), 'A') "
+            "|| setweight(to_tsvector('russian'::regconfig, coalesce(answer, '')), 'B')",
+            persisted=True,
+        ),
+        nullable=False,
+        deferred=True,
+        doc='Полнотекстовый индекс вопроса и ответа.',
+        comment='Автоматически формируемый tsvector для русскоязычного поиска.',
     )
     sources: Mapped[list] = mapped_column(
         JSONB,
