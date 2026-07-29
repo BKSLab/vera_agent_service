@@ -13,6 +13,7 @@ from app.exceptions.chat_session import (
 from app.schemas.chat_history import (
     ChatHistoryResponse,
     ChatHistoryTurnResponse,
+    CurrentChatSessionResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,52 @@ router = APIRouter(
     tags=['История диалога'],
     dependencies=[VerifyApiKeyDep],
 )
+
+
+@router.get(
+    path='/sessions/current',
+    status_code=status.HTTP_200_OK,
+    summary='Получить текущую сессию пользователя',
+    description=(
+        'Возвращает последнюю активную сессию авторизованного пользователя. '
+        'Если пользователь ещё не общался с Верой, session_id равен null.'
+    ),
+    operation_id='getCurrentChatSession',
+    response_description='Текущая сессия пользователя.',
+    response_model=CurrentChatSessionResponse,
+    responses={
+        401: {'description': 'Невалидный сервисный API-ключ.'},
+        422: {'description': 'Не передан идентификатор пользователя.'},
+        429: {'description': 'Превышен лимит запросов.'},
+        500: {'description': 'Ошибка чтения сессии.'},
+    },
+)
+@limiter.limit('60/minute')
+async def get_current_chat_session(
+    request: Request,
+    service: ChatHistoryServiceDep,
+    user_id: Annotated[
+        str,
+        Header(alias='X-Vera-User-ID', min_length=1, max_length=100),
+    ],
+) -> CurrentChatSessionResponse:
+    """Возвращает сессию, которую нужно открыть пользователю."""
+    logger.info('🚀 Поиск текущей сессии пользователя.')
+    try:
+        chat_session = await service.get_current_session(user_id)
+        return CurrentChatSessionResponse(
+            session_id=(
+                chat_session.session_id if chat_session is not None else None
+            )
+        )
+    except ChatSessionServiceError as error:
+        logger.exception(
+            '❌ Не удалось найти текущую сессию пользователя.'
+        )
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=error.detail,
+        ) from error
 
 
 @router.get(

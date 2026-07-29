@@ -12,6 +12,26 @@ from app.services.chat_history import ChatHistoryService
 
 
 @pytest.mark.asyncio
+async def test_get_current_session_returns_latest_user_session():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='user-1',
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    session_repository.get_current_by_user_id.return_value = chat_session
+    service = ChatHistoryService(session_repository, turn_repository)
+
+    result = await service.get_current_session('user-1')
+
+    assert result is chat_session
+    session_repository.get_current_by_user_id.assert_awaited_once_with(
+        'user-1'
+    )
+
+
+@pytest.mark.asyncio
 async def test_chat_history_service_returns_session_turns():
     chat_session = ChatSession(
         id=uuid4(),

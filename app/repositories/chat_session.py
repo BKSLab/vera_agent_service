@@ -25,6 +25,26 @@ class ChatSessionRepository:
             await self.db_session.rollback()
             raise ChatSessionRepositoryError(str(error)) from error
 
+    async def get_current_by_user_id(self, user_id: str) -> ChatSession | None:
+        """Возвращает последнюю активную сессию пользователя."""
+        try:
+            result = await self.db_session.execute(
+                select(ChatSession)
+                .where(
+                    ChatSession.user_id == user_id,
+                    ChatSession.closed_at.is_(None),
+                )
+                .order_by(
+                    ChatSession.last_activity_at.desc(),
+                    ChatSession.created_at.desc(),
+                )
+                .limit(1)
+            )
+            return result.unique().scalar_one_or_none()
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatSessionRepositoryError(str(error)) from error
+
     async def save(self, chat_session: ChatSession) -> ChatSession:
         """Сохраняет новую сессию."""
         try:

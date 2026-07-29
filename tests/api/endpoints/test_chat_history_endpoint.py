@@ -22,6 +22,55 @@ def clear_overrides_and_limiter():
 
 
 @pytest.mark.asyncio
+async def test_current_chat_session_endpoint_returns_user_session():
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_current_session.return_value = SimpleNamespace(
+        session_id='session-1'
+    )
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/current',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'user-1',
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {'session_id': 'session-1'}
+    service.get_current_session.assert_awaited_once_with('user-1')
+
+
+@pytest.mark.asyncio
+async def test_current_chat_session_endpoint_returns_null_for_new_user():
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_current_session.return_value = None
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/current',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'user-1',
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {'session_id': None}
+
+
+@pytest.mark.asyncio
 async def test_chat_history_endpoint_returns_turn_contract():
     now = datetime.now(UTC)
     service = AsyncMock(spec=ChatHistoryService)

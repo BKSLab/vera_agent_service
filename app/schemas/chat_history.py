@@ -4,6 +4,15 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class CurrentChatSessionResponse(BaseModel):
+    """Текущая сессия авторизованного пользователя."""
+
+    session_id: str | None = Field(
+        None,
+        description='Идентификатор последней активной сессии или null.',
+    )
+
+
 class ChatHistoryTurnResponse(BaseModel):
     """Одна пользовательская реплика и ответ Веры."""
 
