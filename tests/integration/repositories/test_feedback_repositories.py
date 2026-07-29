@@ -18,7 +18,12 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
     message_feedback_repository = MessageFeedbackRepository(db_session)
     session_feedback_repository = SessionFeedbackRepository(db_session)
 
-    chat_session = await session_repository.save(ChatSession(session_id='session-1'))
+    chat_session = await session_repository.save(
+        ChatSession(
+            session_id='session-1',
+            anonymous_token_hash='a' * 64,
+        )
+    )
     chat_turn = await turn_repository.save(
         ChatTurn(
             request_id='request-1',
@@ -38,11 +43,15 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
         session_id='session-1',
         request_id='request-1',
         value='down',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
     )
     second_rating = await message_service.upsert_feedback(
         session_id='session-1',
         request_id='request-1',
         value='up',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
     )
     await turn_repository.save(
         ChatTurn(
@@ -54,7 +63,11 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
             status='completed',
         )
     )
-    history = await turn_repository.list_by_chat_session_id(chat_session.id)
+    history, has_more = await turn_repository.list_by_chat_session_id(
+        chat_session.id,
+        limit=30,
+        before_sequence=None,
+    )
 
     session_service = SessionFeedbackService(
         session_repository,
@@ -68,6 +81,8 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
         trust=4,
         comment='Комментарий',
         contact_email='user@example.ru',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
     )
     second_form = await session_service.create_feedback(
         session_id='session-1',
@@ -77,11 +92,14 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
         trust=4,
         comment='Комментарий',
         contact_email='user@example.ru',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
     )
 
     assert first_rating.id == second_rating.id
     assert second_rating.value == 'up'
     assert [turn.request_id for turn in history] == ['request-1', 'request-2']
+    assert has_more is False
     assert history[0].feedback.value == 'up'
     assert first_form.id == second_form.id
     assert chat_turn.request_id == 'request-1'
@@ -94,7 +112,10 @@ async def test_repositories_use_russian_full_text_search_and_filters(db_session)
     session_feedback_repository = SessionFeedbackRepository(db_session)
 
     chat_session = await session_repository.save(
-        ChatSession(session_id='search-session')
+        ChatSession(
+            session_id='search-session',
+            anonymous_token_hash='b' * 64,
+        )
     )
     matching_turn = await turn_repository.save(
         ChatTurn(
@@ -123,6 +144,8 @@ async def test_repositories_use_russian_full_text_search_and_filters(db_session)
         session_id='search-session',
         request_id='search-request',
         value='down',
+        user_id=None,
+        anonymous_token_hash='b' * 64,
     )
     await SessionFeedbackService(
         session_repository,
@@ -135,6 +158,8 @@ async def test_repositories_use_russian_full_text_search_and_filters(db_session)
         trust=3,
         comment='Не хватило информации о трудоустройстве.',
         contact_email=None,
+        user_id=None,
+        anonymous_token_hash='b' * 64,
     )
 
     turn_results = await turn_repository.search(

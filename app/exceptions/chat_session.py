@@ -27,3 +27,10 @@ class ChatSessionNotFoundError(Exception):
     @property
     def detail(self) -> str:
         return f'Сессия {self.session_id} не найдена.'
+
+
+class ChatSessionAccessDeniedError(Exception):
+    """Запрашивающий пользователь не владеет сессией."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    detail = 'Нет доступа к этой сессии.'

@@ -36,12 +36,10 @@ class ChatSessionRepository:
             await self.db_session.rollback()
             raise ChatSessionRepositoryError(str(error)) from error
 
-    async def touch(self, chat_session: ChatSession, user_id: str | None) -> ChatSession:
-        """Обновляет дату активности и известный идентификатор пользователя."""
+    async def touch(self, chat_session: ChatSession) -> ChatSession:
+        """Обновляет дату последней активности сессии."""
         try:
             chat_session.last_activity_at = datetime.now(UTC)
-            if user_id is not None:
-                chat_session.user_id = user_id
             await self.db_session.commit()
             return chat_session
         except SQLAlchemyError as error:

@@ -1,11 +1,15 @@
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from app.core.rate_limit import limiter
 from app.dependencies.auth import VerifyApiKeyDep
 from app.dependencies.services import SessionFeedbackServiceDep
-from app.exceptions.chat_session import ChatSessionNotFoundError
+from app.exceptions.chat_session import (
+    ChatSessionAccessDeniedError,
+    ChatSessionNotFoundError,
+)
 from app.exceptions.session_feedback import (
     SessionFeedbackServiceError,
     SessionFeedbackSubmissionMismatchError,
@@ -41,6 +45,14 @@ async def create_session_feedback(
     request: Request,
     data: SessionFeedbackRequest,
     service: SessionFeedbackServiceDep,
+    user_id: Annotated[
+        str | None,
+        Header(alias='X-Vera-User-ID', max_length=100),
+    ] = None,
+    anonymous_token_hash: Annotated[
+        str | None,
+        Header(alias='X-Vera-Anonymous-Token-Hash', min_length=64, max_length=64),
+    ] = None,
 ) -> SessionFeedbackResponse:
     """Сохраняет развёрнутый отзыв по сессии.
 
@@ -66,6 +78,8 @@ async def create_session_feedback(
             trust=data.trust,
             comment=data.comment,
             contact_email=str(data.contact_email) if data.contact_email is not None else None,
+            user_id=user_id,
+            anonymous_token_hash=anonymous_token_hash,
         )
         logger.info(
             '✅ Отзыв по сессии сохранён. submission_id=%s.',
@@ -79,6 +93,7 @@ async def create_session_feedback(
             created_at=feedback.created_at,
         )
     except (
+        ChatSessionAccessDeniedError,
         ChatSessionNotFoundError,
         SessionFeedbackSubmissionMismatchError,
         SessionFeedbackServiceError,

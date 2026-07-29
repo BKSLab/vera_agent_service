@@ -11,6 +11,7 @@ from app.exceptions.chat_turn import (
 )
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
+from app.services.chat_session_access import ensure_chat_session_access
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class ChatPersistenceService:
         session_id: str,
         request_id: str,
         user_id: str | None,
+        anonymous_token_hash: str | None,
         question: str,
     ) -> TurnStartResult:
         """Создаёт сессию и processing-реплику без дублей по request_id."""
@@ -46,6 +48,11 @@ class ChatPersistenceService:
             if existing_turn is not None:
                 if existing_turn.chat_session.session_id != session_id:
                     raise ChatTurnSessionMismatchError
+                ensure_chat_session_access(
+                    existing_turn.chat_session,
+                    user_id=user_id,
+                    anonymous_token_hash=anonymous_token_hash,
+                )
                 return TurnStartResult(
                     created=False,
                     status=existing_turn.status,
@@ -55,10 +62,24 @@ class ChatPersistenceService:
             chat_session = await self.chat_session_repository.get_by_session_id(session_id)
             if chat_session is None:
                 chat_session = await self.chat_session_repository.save(
-                    ChatSession(session_id=session_id, user_id=user_id)
+                    ChatSession(
+                        session_id=session_id,
+                        user_id=user_id,
+                        anonymous_token_hash=(
+                            anonymous_token_hash if user_id is None else None
+                        ),
+                    )
                 )
             else:
-                chat_session = await self.chat_session_repository.touch(chat_session, user_id)
+                ensure_chat_session_access(
+                    chat_session,
+                    user_id=user_id,
+                    anonymous_token_hash=anonymous_token_hash,
+                )
+                if chat_session.user_id is None and user_id is not None:
+                    chat_session.user_id = user_id
+                    chat_session.anonymous_token_hash = None
+                chat_session = await self.chat_session_repository.touch(chat_session)
 
             sequence_number = await self.chat_turn_repository.get_next_sequence_number(
                 chat_session.id
@@ -80,6 +101,11 @@ class ChatPersistenceService:
                 raise ChatPersistenceServiceError from None
             if existing_turn.chat_session.session_id != session_id:
                 raise ChatTurnSessionMismatchError from None
+            ensure_chat_session_access(
+                existing_turn.chat_session,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
             return TurnStartResult(
                 created=False,
                 status=existing_turn.status,

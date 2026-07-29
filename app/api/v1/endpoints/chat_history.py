@@ -1,13 +1,13 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Path, Request, status
+from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, status
 
 from app.core.rate_limit import limiter
 from app.dependencies.auth import VerifyApiKeyDep
 from app.dependencies.services import ChatHistoryServiceDep
 from app.exceptions.chat_session import (
-    ChatSessionNotFoundError,
+    ChatSessionAccessDeniedError,
     ChatSessionServiceError,
 )
 from app.schemas.chat_history import (
@@ -36,7 +36,7 @@ router = APIRouter(
     response_model=ChatHistoryResponse,
     responses={
         401: {'description': 'Невалидный сервисный API-ключ.'},
-        404: {'description': 'Сессия не найдена.'},
+        403: {'description': 'Сессия принадлежит другому владельцу.'},
         422: {'description': 'Ошибка валидации session_id.'},
         429: {'description': 'Превышен лимит запросов.'},
         500: {'description': 'Ошибка чтения истории.'},
@@ -54,15 +54,31 @@ async def get_chat_history(
         ),
     ],
     service: ChatHistoryServiceDep,
+    user_id: Annotated[
+        str | None,
+        Header(alias='X-Vera-User-ID', max_length=100),
+    ] = None,
+    anonymous_token_hash: Annotated[
+        str | None,
+        Header(alias='X-Vera-Anonymous-Token-Hash', min_length=64, max_length=64),
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    before_sequence: Annotated[int | None, Query(ge=1)] = None,
 ) -> ChatHistoryResponse:
     """Возвращает пользовательскую историю существующей сессии."""
     logger.info('🚀 Загрузка истории диалога. session_id=%s.', session_id)
     try:
-        turns = await service.get_history(session_id)
+        page = await service.get_history(
+            session_id,
+            user_id=user_id,
+            anonymous_token_hash=anonymous_token_hash,
+            limit=limit,
+            before_sequence=before_sequence,
+        )
         logger.info(
             '✅ История диалога загружена. session_id=%s, turns=%s.',
             session_id,
-            len(turns),
+            len(page.turns),
         )
         return ChatHistoryResponse(
             session_id=session_id,
@@ -81,11 +97,12 @@ async def get_chat_history(
                     created_at=turn.created_at,
                     completed_at=turn.completed_at,
                 )
-                for turn in turns
+                for turn in page.turns
             ],
+            next_before_sequence=page.next_before_sequence,
         )
     except (
-        ChatSessionNotFoundError,
+        ChatSessionAccessDeniedError,
         ChatSessionServiceError,
     ) as error:
         logger.exception(

@@ -42,16 +42,27 @@ class ChatTurnRepository:
     async def list_by_chat_session_id(
         self,
         chat_session_id: UUID,
-    ) -> list[ChatTurn]:
-        """Возвращает реплики с оценками в порядке диалога."""
+        *,
+        limit: int,
+        before_sequence: int | None,
+    ) -> tuple[list[ChatTurn], bool]:
+        """Возвращает страницу реплик с оценками от старых к новым."""
         try:
-            result = await self.db_session.execute(
+            query = (
                 select(ChatTurn)
                 .where(ChatTurn.chat_session_id == chat_session_id)
                 .options(selectinload(ChatTurn.feedback))
-                .order_by(ChatTurn.sequence_number)
+                .order_by(ChatTurn.sequence_number.desc())
+                .limit(limit + 1)
             )
-            return list(result.unique().scalars().all())
+            if before_sequence is not None:
+                query = query.where(ChatTurn.sequence_number < before_sequence)
+            result = await self.db_session.execute(query)
+            descending_turns = list(result.unique().scalars().all())
+            has_more = len(descending_turns) > limit
+            page = descending_turns[:limit]
+            page.reverse()
+            return page, has_more
         except SQLAlchemyError as error:
             await self.db_session.rollback()
             raise ChatTurnRepositoryError(str(error)) from error

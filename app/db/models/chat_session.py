@@ -44,6 +44,13 @@ class ChatSession(Base):
         doc='Идентификатор авторизованного пользователя.',
         comment='Идентификатор пользователя сайта, если он был авторизован.',
     )
+    anonymous_token_hash: Mapped[str | None] = mapped_column(
+        String(length=64),
+        nullable=True,
+        index=True,
+        doc='SHA-256 подписанного токена анонимной сессии.',
+        comment='Хеш серверного токена владельца анонимной сессии.',
+    )
     service_metadata: Mapped[dict] = mapped_column(
         JSONB,
         nullable=False,

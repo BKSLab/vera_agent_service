@@ -11,6 +11,7 @@ from app.exceptions.session_feedback import (
 )
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.session_feedback import SessionFeedbackRepository
+from app.services.chat_session_access import ensure_chat_session_access
 
 
 class SessionFeedbackService:
@@ -33,6 +34,8 @@ class SessionFeedbackService:
         trust: int | None,
         comment: str | None,
         contact_email: str | None,
+        user_id: str | None,
+        anonymous_token_hash: str | None,
     ) -> SessionFeedback:
         """Создаёт отзыв или возвращает ранее созданный по submission_id."""
         try:
@@ -42,11 +45,21 @@ class SessionFeedbackService:
             if existing is not None:
                 if existing.chat_session.session_id != session_id:
                     raise SessionFeedbackSubmissionMismatchError
+                ensure_chat_session_access(
+                    existing.chat_session,
+                    user_id=user_id,
+                    anonymous_token_hash=anonymous_token_hash,
+                )
                 return existing
 
             chat_session = await self.chat_session_repository.get_by_session_id(session_id)
             if chat_session is None:
                 raise ChatSessionNotFoundError(session_id)
+            ensure_chat_session_access(
+                chat_session,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
 
             return await self.session_feedback_repository.save(
                 SessionFeedback(
@@ -70,6 +83,11 @@ class SessionFeedbackService:
                 raise SessionFeedbackServiceError from None
             if existing.chat_session.session_id != session_id:
                 raise SessionFeedbackSubmissionMismatchError from None
+            ensure_chat_session_access(
+                existing.chat_session,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
             return existing
         except (ChatSessionRepositoryError, SessionFeedbackRepositoryError) as error:
             raise SessionFeedbackServiceError from error

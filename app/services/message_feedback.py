@@ -11,6 +11,7 @@ from app.exceptions.message_feedback import (
 )
 from app.repositories.chat_turn import ChatTurnRepository
 from app.repositories.message_feedback import MessageFeedbackRepository
+from app.services.chat_session_access import ensure_chat_session_access
 
 
 class MessageFeedbackService:
@@ -29,6 +30,8 @@ class MessageFeedbackService:
         session_id: str,
         request_id: str,
         value: str,
+        user_id: str | None,
+        anonymous_token_hash: str | None,
     ) -> MessageFeedback:
         """Сохраняет единственную оценку завершённой реплики."""
         try:
@@ -37,6 +40,11 @@ class MessageFeedbackService:
                 raise ChatTurnNotFoundError(request_id)
             if chat_turn.chat_session.session_id != session_id:
                 raise ChatTurnSessionMismatchError
+            ensure_chat_session_access(
+                chat_turn.chat_session,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
             if chat_turn.status != 'completed':
                 raise ChatTurnNotCompletedError
 

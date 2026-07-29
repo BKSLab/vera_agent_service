@@ -13,6 +13,7 @@ from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttribu
 from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
+from app.exceptions.chat_session import ChatSessionAccessDeniedError
 from app.exceptions.chat_turn import (
     ChatPersistenceServiceError,
     ChatTurnSessionMismatchError,
@@ -216,9 +217,13 @@ class AgentRequestConsumer:
         processing_started_at = time.monotonic()
         try:
             persistence_start = await self._start_persistence(payload)
-        except ChatTurnSessionMismatchError as error:
+        except (
+            ChatSessionAccessDeniedError,
+            ChatTurnSessionMismatchError,
+        ) as error:
             logger.error(
-                '❌ request_id относится к другой сессии. session_id=%s, request_id=%s.',
+                '❌ Запрос не относится к доступной сессии. '
+                'session_id=%s, request_id=%s.',
                 payload.session_id,
                 payload.request_id,
             )
@@ -466,6 +471,7 @@ class AgentRequestConsumer:
                 session_id=payload.session_id,
                 request_id=payload.request_id,
                 user_id=payload.user_id,
+                anonymous_token_hash=payload.anonymous_token_hash,
                 question=payload.message,
             )
 

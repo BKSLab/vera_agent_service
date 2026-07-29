@@ -343,6 +343,7 @@ async def test_successful_message_persists_question_answer_and_sources():
         session_id='s1',
         request_id='r1',
         user_id=None,
+        anonymous_token_hash=None,
         question='question',
     )
     complete_call = persistence_service.complete_turn.await_args.kwargs

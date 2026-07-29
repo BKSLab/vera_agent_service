@@ -1,10 +1,12 @@
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from app.core.rate_limit import limiter
 from app.dependencies.auth import VerifyApiKeyDep
 from app.dependencies.services import MessageFeedbackServiceDep
+from app.exceptions.chat_session import ChatSessionAccessDeniedError
 from app.exceptions.chat_turn import (
     ChatTurnNotCompletedError,
     ChatTurnNotFoundError,
@@ -42,6 +44,14 @@ async def upsert_message_feedback(
     request: Request,
     data: MessageFeedbackRequest,
     service: MessageFeedbackServiceDep,
+    user_id: Annotated[
+        str | None,
+        Header(alias='X-Vera-User-ID', max_length=100),
+    ] = None,
+    anonymous_token_hash: Annotated[
+        str | None,
+        Header(alias='X-Vera-Anonymous-Token-Hash', min_length=64, max_length=64),
+    ] = None,
 ) -> MessageFeedbackResponse:
     """Создаёт или изменяет оценку конкретного ответа.
 
@@ -63,6 +73,8 @@ async def upsert_message_feedback(
             session_id=data.session_id,
             request_id=data.request_id,
             value=data.value,
+            user_id=user_id,
+            anonymous_token_hash=anonymous_token_hash,
         )
         logger.info('✅ Оценка ответа сохранена. request_id=%s.', data.request_id)
         return MessageFeedbackResponse(
@@ -75,6 +87,7 @@ async def upsert_message_feedback(
             updated_at=feedback.updated_at,
         )
     except (
+        ChatSessionAccessDeniedError,
         ChatTurnNotFoundError,
         ChatTurnSessionMismatchError,
         ChatTurnNotCompletedError,

@@ -5,6 +5,7 @@ import pytest
 
 from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import ChatTurn
+from app.exceptions.chat_session import ChatSessionAccessDeniedError
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
 from app.services.chat_persistence import ChatPersistenceService
@@ -29,6 +30,7 @@ async def test_start_turn_creates_session_and_processing_turn():
         session_id='session-1',
         request_id='request-1',
         user_id='user-1',
+        anonymous_token_hash=None,
         question='Вопрос',
     )
 
@@ -43,7 +45,11 @@ async def test_start_turn_creates_session_and_processing_turn():
 async def test_start_turn_returns_completed_turn_without_creating_duplicate():
     session_repository = AsyncMock(spec=ChatSessionRepository)
     turn_repository = AsyncMock(spec=ChatTurnRepository)
-    chat_session = ChatSession(id=uuid4(), session_id='session-1')
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        anonymous_token_hash='a' * 64,
+    )
     turn_repository.get_by_request_id.return_value = ChatTurn(
         id=uuid4(),
         request_id='request-1',
@@ -60,6 +66,7 @@ async def test_start_turn_returns_completed_turn_without_creating_duplicate():
         session_id='session-1',
         request_id='request-1',
         user_id=None,
+        anonymous_token_hash='a' * 64,
         question='Вопрос',
     )
 
@@ -67,6 +74,28 @@ async def test_start_turn_returns_completed_turn_without_creating_duplicate():
     assert result.status == 'completed'
     assert result.answer == 'Ответ'
     turn_repository.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_rejects_wrong_anonymous_owner():
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    session_repository.get_by_session_id.return_value = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        anonymous_token_hash='a' * 64,
+    )
+    turn_repository.get_by_request_id.return_value = None
+    service = ChatPersistenceService(session_repository, turn_repository)
+
+    with pytest.raises(ChatSessionAccessDeniedError):
+        await service.start_turn(
+            session_id='session-1',
+            request_id='request-2',
+            user_id=None,
+            anonymous_token_hash='b' * 64,
+            question='Вопрос',
+        )
 
 
 @pytest.mark.asyncio

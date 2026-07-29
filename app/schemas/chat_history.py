@@ -51,3 +51,7 @@ class ChatHistoryResponse(BaseModel):
         default_factory=list,
         description='Реплики в порядке их появления.',
     )
+    next_before_sequence: int | None = Field(
+        None,
+        description='Курсор следующей страницы более старых реплик.',
+    )

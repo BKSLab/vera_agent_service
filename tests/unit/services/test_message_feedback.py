@@ -13,7 +13,11 @@ from app.services.message_feedback import MessageFeedbackService
 
 @pytest.mark.asyncio
 async def test_upsert_feedback_changes_value_without_creating_second_record():
-    session = ChatSession(id=uuid4(), session_id='session-1')
+    session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='user-1',
+    )
     turn = ChatTurn(
         id=uuid4(),
         request_id='request-1',
@@ -40,6 +44,8 @@ async def test_upsert_feedback_changes_value_without_creating_second_record():
         session_id='session-1',
         request_id='request-1',
         value='up',
+        user_id='user-1',
+        anonymous_token_hash=None,
     )
 
     assert result is existing_feedback

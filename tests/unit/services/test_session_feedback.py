@@ -12,7 +12,11 @@ from app.services.session_feedback import SessionFeedbackService
 
 @pytest.mark.asyncio
 async def test_create_feedback_returns_existing_submission_id():
-    session = ChatSession(id=uuid4(), session_id='session-1')
+    session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='user-1',
+    )
     existing = SessionFeedback(
         id=uuid4(),
         chat_session_id=session.id,
@@ -32,6 +36,8 @@ async def test_create_feedback_returns_existing_submission_id():
         trust=None,
         comment=None,
         contact_email=None,
+        user_id='user-1',
+        anonymous_token_hash=None,
     )
 
     assert result is existing
