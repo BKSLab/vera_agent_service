@@ -39,6 +39,23 @@ class ChatTurnRepository:
             await self.db_session.rollback()
             raise ChatTurnRepositoryError(str(error)) from error
 
+    async def list_by_chat_session_id(
+        self,
+        chat_session_id: UUID,
+    ) -> list[ChatTurn]:
+        """Возвращает реплики с оценками в порядке диалога."""
+        try:
+            result = await self.db_session.execute(
+                select(ChatTurn)
+                .where(ChatTurn.chat_session_id == chat_session_id)
+                .options(selectinload(ChatTurn.feedback))
+                .order_by(ChatTurn.sequence_number)
+            )
+            return list(result.unique().scalars().all())
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatTurnRepositoryError(str(error)) from error
+
     async def get_next_sequence_number(self, chat_session_id: UUID) -> int:
         """Возвращает следующий порядковый номер реплики в сессии."""
         try:

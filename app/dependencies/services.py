@@ -13,9 +13,26 @@ from app.dependencies.repositories import (
 )
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
+from app.services.chat_history import ChatHistoryService
 from app.services.chat_persistence import ChatPersistenceService
 from app.services.message_feedback import MessageFeedbackService
 from app.services.session_feedback import SessionFeedbackService
+
+
+def get_chat_history_service(
+    chat_session_repository: ChatSessionRepositoryDep,
+    chat_turn_repository: ChatTurnRepositoryDep,
+) -> ChatHistoryService:
+    return ChatHistoryService(
+        chat_session_repository=chat_session_repository,
+        chat_turn_repository=chat_turn_repository,
+    )
+
+
+ChatHistoryServiceDep = Annotated[
+    ChatHistoryService,
+    Depends(get_chat_history_service),
+]
 
 
 def get_message_feedback_service(

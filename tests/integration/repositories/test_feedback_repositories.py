@@ -44,6 +44,17 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
         request_id='request-1',
         value='up',
     )
+    await turn_repository.save(
+        ChatTurn(
+            request_id='request-2',
+            chat_session_id=chat_session.id,
+            sequence_number=2,
+            question='Второй вопрос',
+            answer='Второй ответ',
+            status='completed',
+        )
+    )
+    history = await turn_repository.list_by_chat_session_id(chat_session.id)
 
     session_service = SessionFeedbackService(
         session_repository,
@@ -70,6 +81,8 @@ async def test_repositories_persist_turn_and_feedback_without_duplicates(db_sess
 
     assert first_rating.id == second_rating.id
     assert second_rating.value == 'up'
+    assert [turn.request_id for turn in history] == ['request-1', 'request-2']
+    assert history[0].feedback.value == 'up'
     assert first_form.id == second_form.id
     assert chat_turn.request_id == 'request-1'
 

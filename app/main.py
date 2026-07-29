@@ -11,6 +11,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from sqlalchemy import text
 
 from app.admin import create_admin
+from app.api.v1.endpoints.chat_history import router as chat_history_router
 from app.api.v1.endpoints.health import create_health_router
 from app.api.v1.endpoints.message_feedback import router as message_feedback_router
 from app.api.v1.endpoints.session_feedback import router as session_feedback_router
@@ -119,5 +120,6 @@ app.add_middleware(SlowAPIMiddleware)
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
 create_admin(app=app, engine=engine)
 app.include_router(create_sse_router(session_bus))
+app.include_router(chat_history_router, prefix='/api/v1')
 app.include_router(message_feedback_router, prefix='/api/v1')
 app.include_router(session_feedback_router, prefix='/api/v1')

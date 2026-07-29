@@ -1,0 +1,111 @@
+from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+
+from app.core.rate_limit import limiter
+from app.core.settings import get_settings
+from app.dependencies.services import get_chat_history_service
+from app.exceptions.chat_session import ChatSessionNotFoundError
+from app.main import app
+from app.services.chat_history import ChatHistoryService
+
+
+@pytest.fixture(autouse=True)
+def clear_overrides_and_limiter():
+    limiter.reset()
+    yield
+    app.dependency_overrides.clear()
+    limiter.reset()
+
+
+@pytest.mark.asyncio
+async def test_chat_history_endpoint_returns_turn_contract():
+    now = datetime.now(UTC)
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_history.return_value = [
+        SimpleNamespace(
+            request_id='request-1',
+            sequence_number=1,
+            question='Вопрос',
+            answer='Ответ',
+            status='completed',
+            feedback=SimpleNamespace(value='up'),
+            created_at=now,
+            completed_at=now,
+        )
+    ]
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/session-1/history',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'session_id': 'session-1',
+        'turns': [
+            {
+                'request_id': 'request-1',
+                'sequence_number': 1,
+                'question': 'Вопрос',
+                'answer': 'Ответ',
+                'status': 'completed',
+                'feedback_value': 'up',
+                'created_at': now.isoformat().replace('+00:00', 'Z'),
+                'completed_at': now.isoformat().replace('+00:00', 'Z'),
+            }
+        ],
+    }
+    service.get_history.assert_awaited_once_with('session-1')
+
+
+@pytest.mark.asyncio
+async def test_chat_history_endpoint_returns_not_found_for_unknown_session():
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_history.side_effect = ChatSessionNotFoundError(
+        'missing-session'
+    )
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/missing-session/history',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        'detail': 'Сессия missing-session не найдена.',
+    }
+
+
+@pytest.mark.asyncio
+async def test_chat_history_endpoint_rejects_missing_api_key():
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/session-1/history',
+        )
+
+    assert response.status_code == 422
