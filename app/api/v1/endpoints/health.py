@@ -4,6 +4,8 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.clients.mcp_client import get_tools_with_retry
 from app.core.settings import McpSettings
@@ -19,7 +21,7 @@ MCP_HEALTH_CHECK_TIMEOUT_SECONDS: float = 2.0
 
 
 class HealthStatus(BaseModel):
-    """`status`/`rabbitmq`/`redis` — жёсткие: недоступность любого из них
+    """`status`/`rabbitmq`/`redis`/`database` — жёсткие: недоступность любого из них
     переводит `status` в `degraded` и код ответа в `503`. `mcp` —
     информационное поле, не влияет ни на `status`, ни на код ответа:
     недоступность MCP не мешает агенту запуститься и отвечать с деградацией."""
@@ -27,12 +29,14 @@ class HealthStatus(BaseModel):
     status: str
     rabbitmq: str
     redis: str
+    database: str
     mcp: str
 
 
 def create_health_router(
     consumer: AgentRequestConsumer,
     redis_health_client: Redis,
+    db_engine: AsyncEngine,
     mcp_client,
     mcp_settings: McpSettings,
 ) -> APIRouter:
@@ -50,16 +54,25 @@ def create_health_router(
             redis_ok = False
 
         try:
+            async with db_engine.connect() as connection:
+                await connection.execute(text('SELECT 1'))
+            database_ok = True
+        except Exception as error:  # noqa: BLE001 - любая ошибка PostgreSQL = недоступен
+            logger.warning('⚠️ PostgreSQL health-check неуспешен: %s', error)
+            database_ok = False
+
+        try:
             await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=MCP_HEALTH_CHECK_TIMEOUT_SECONDS)
             mcp_ok = True
         except McpUnavailableError:
             mcp_ok = False
 
-        hard_dependencies_ok = rabbitmq_ok and redis_ok
+        hard_dependencies_ok = rabbitmq_ok and redis_ok and database_ok
         body = HealthStatus(
             status='ok' if hard_dependencies_ok else 'degraded',
             rabbitmq='ok' if rabbitmq_ok else 'unavailable',
             redis='ok' if redis_ok else 'unavailable',
+            database='ok' if database_ok else 'unavailable',
             mcp='ok' if mcp_ok else 'unavailable',
         )
         return JSONResponse(

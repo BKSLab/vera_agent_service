@@ -1,7 +1,22 @@
 volumes:
   phoenix_data:
+  pg_vera_analytics_assistant_data:
 
 services:
+  db:
+    container_name: vera_analytics_assistant_db
+    image: postgres:16-alpine3.19
+    env_file: .env
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pg_vera_analytics_assistant_data:/var/lib/postgresql/data
+    ports:
+      - "5438:5432"
   phoenix:
     container_name: vera_agent_phoenix
     # Локальный Phoenix для разработки (Этап 9). С Этапа 8 плана
@@ -38,6 +53,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      POSTGRES_HOST: db
       PHOENIX_OTLP_ENDPOINT: http://phoenix:6006/v1/traces
       PHOENIX_PROJECT_NAME: ${PHOENIX_PROJECT_NAME:-vera-local}
     restart: on-failure
@@ -50,3 +66,6 @@ services:
       resources:
         limits:
           memory: 1GB
+    depends_on:
+      db:
+        condition: service_healthy

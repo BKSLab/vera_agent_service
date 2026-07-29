@@ -19,6 +19,31 @@ class AppSettings(SettingsBase):
 
     app_name: str = 'vera_agent_service'
     logging_config_path: str = 'logging.ini'
+    secret_key: SecretStr
+    admin_login: str
+    admin_password: SecretStr
+    admin_session_https_only: bool = False
+    api_key: SecretStr
+
+
+class DBSettings(SettingsBase):
+    """Настройки подключения к PostgreSQL."""
+
+    postgres_host: str
+    postgres_port: int
+    postgres_user: str
+    postgres_password: SecretStr
+    postgres_name: str
+
+    @property
+    def url_connect(self) -> str:
+        """Формирует строку асинхронного подключения SQLAlchemy."""
+        return (
+            f'postgresql+asyncpg://{self.postgres_user}:'
+            f'{self.postgres_password.get_secret_value()}@'
+            f'{self.postgres_host}:{self.postgres_port}/'
+            f'{self.postgres_name}'
+        )
 
 
 class RabbitMQSettings(SettingsBase):
@@ -105,6 +130,7 @@ class Settings(BaseSettings):
     """Агрегатор всех доменных настроек проекта."""
 
     app: AppSettings = Field(default_factory=AppSettings)
+    db: DBSettings = Field(default_factory=DBSettings)
     rabbitmq: RabbitMQSettings = Field(default_factory=RabbitMQSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)

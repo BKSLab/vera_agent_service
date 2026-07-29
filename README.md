@@ -16,10 +16,11 @@ Agent Service — оркестратор диалога AI-консультан�
 4. **MCP Tools Server** — локальные прокси-схемы собирают граф без сетевого обращения; оба удалённых инструмента резолвятся лениво при первом фактическом вызове. Идемпотентный поиск допускает ретраи. Мутирующая отправка письма выполняется строго один раз с отдельным увеличенным timeout: после сетевой неопределённости агент не повторяет ни тулу, ни весь граф.
 5. **Доставка ответа** — `GET /sse/{request_id}` (`app/streaming/`), токены по мере генерации, терминальные события `done`/`error`. `request_id` изолирует late-connect буфер и SSE одного сообщения от других запросов той же сессии. Одна реплика сервиса по-прежнему не масштабируется без перехода на Redis Pub/Sub.
 6. **Наблюдаемость** — OpenTelemetry + `openinference-instrumentation-langchain` → Arize Phoenix (`app/observability/`). Один корневой span `vera.agent.request` охватывает обработку сообщения целиком. Для `tool.send_consultation_email` сохраняются только безопасные агрегаты и статус — текст консультации, email и полный ответ тулы в этот span не записываются.
+7. **Обратная связь и админка** — завершённые реплики сохраняются в PostgreSQL для оценок и экспертного разбора. Redis остаётся источником рабочей истории агента; PostgreSQL не участвует в построении контекста графа.
 
 ## Стек
 
-FastAPI/`hypercorn` · LangGraph · `langchain-openai` (LLM-провайдер конфигурируется, не захардкожен) · `langchain-mcp-adapters` (MCP-клиент) · RabbitMQ/`aio-pika` (вход) · Redis Stack/`langgraph-checkpoint-redis` (состояние диалога — обычный Redis не подходит, нужен RediSearch) · SSE (выход) · OpenTelemetry/`openinference` → Arize Phoenix (наблюдаемость) · Docker Compose
+FastAPI/`hypercorn` · LangGraph · `langchain-openai` (LLM-провайдер конфигурируется, не захардкожен) · `langchain-mcp-adapters` (MCP-клиент) · RabbitMQ/`aio-pika` (вход) · Redis Stack/`langgraph-checkpoint-redis` (состояние диалога — обычный Redis не подходит, нужен RediSearch) · PostgreSQL/SQLAlchemy/Alembic (аналитическая копия диалогов и обратная связь) · SQLAdmin (экспертная админка) · SSE (выход) · OpenTelemetry/`openinference` → Arize Phoenix (наблюдаемость) · Docker Compose
 
 ## Контракты
 
@@ -29,15 +30,17 @@ FastAPI/`hypercorn` · LangGraph · `langchain-openai` (LLM-провайдер �
 |---|---|---|
 | `agent.requests` (RabbitMQ) | Next.js Proxy → Agent Service | `{session_id, request_id, user_id, message}`, без истории; `request_id` обязателен, retry только для системных сбоев, DLQ `agent.requests.dlq` |
 | `GET /sse/{request_id}` | Клиент ← Agent Service | `data: {"type": "token"/"done"/"error", ...}` только для одного пользовательского запроса |
+| `PUT /api/v1/feedback/message` | Frontend → Agent Service | Создать или изменить оценку `up`/`down` для завершённого ответа |
+| `POST /api/v1/feedback/session` | Frontend → Agent Service | Идемпотентно сохранить итоговую анкету по сессии |
 | Тул `vera_rag_kb` (MCP) | Agent Service → MCP Tools Server | `vera_rag_kb(query: str) -> {"chunks": [...]}` — роль пользователя не передаётся в поиск; формат чанков совпадает с `POST /api/v1/search` в `vera_rag_service` |
 | Тул `send_consultation_email` (MCP) | Agent Service → MCP Tools Server | `send_consultation_email(consultation_text: str, email: str) -> dict`; вызывается только по явной просьбе с указанным адресом, не ретраится |
-| `GET /health` | Оркестратор/мониторинг | `rabbitmq`/`redis` — жёсткий статус (влияет на код ответа); `mcp` — информационное поле, недоступность не даёт `503` |
+| `GET /health` | Оркестратор/мониторинг | `rabbitmq`/`redis`/`database` — жёсткий статус (влияет на код ответа); `mcp` — информационное поле, недоступность не даёт `503` |
 
 ## Запуск локально
 
 ```bash
 cp .env.example .env
-# заполнить .env — минимум RABBITMQ_*, REDIS_*, LLM_* (LLM_API_KEY/LLM_API_URL/LLM_MODEL — любой OpenAI-совместимый провайдер)
+# заполнить .env — RABBITMQ_*, REDIS_*, POSTGRES_*, LLM_*, API_KEY и ADMIN_*
 
 docker compose up -d --build
 ```
@@ -46,6 +49,8 @@ docker compose up -d --build
 |---|---|
 | Agent Service | `http://localhost:8010` |
 | `GET /health` | `http://localhost:8010/health` |
+| Админка | `http://localhost:8010/admin` |
+| PostgreSQL | `localhost:5438` |
 | RabbitMQ management UI | `http://localhost:15672` |
 | Redis | `localhost:6379` (Redis Stack — не обычный Redis, см. `app/checkpoint/redis_saver.py`) |
 | Arize Phoenix (трейсы) | `http://localhost:6006` |
@@ -94,12 +99,14 @@ pytest tests/                # юнит + интеграционные (треб
 ruff check .                 # линтер
 ```
 
-Интеграционные тесты (маркер `integration`) используют реальные RabbitMQ и Redis Stack из `docker-compose.yml`, и настоящий мок MCP Tools Server (`tests/fixtures/mock_mcp_server.py`, поднимается тестами на свободном порту — не требует внешней инфраструктуры).
+Интеграционные тесты (маркер `integration`) используют реальные RabbitMQ и Redis Stack из `docker-compose.yml`, PostgreSQL через Testcontainers и настоящий мок MCP Tools Server (`tests/fixtures/mock_mcp_server.py`, поднимается тестами на свободном порту — не требует внешней инфраструктуры).
 
 ## Документация
 
 - [`AGENT_SERVICE_PLAN.md`](AGENT_SERVICE_PLAN.md) — план реализации по этапам, зафиксированные технические решения, контракты, находки, соответствие WBS
 - [`AGENT_VERA_ARCHITECTURE.md`](AGENT_VERA_ARCHITECTURE.md) — исходная архитектурная концепция трёх сервисов
+- [`ADMIN_GUIDE.md`](ADMIN_GUIDE.md) — работа с админкой и обратной связью
+- [`SITE_FEEDBACK_API_CONTRACT.md`](SITE_FEEDBACK_API_CONTRACT.md) — контракт двух feedback-запросов для серверной части сайта
 - [`FASTAPI_PATTERNS.md`](FASTAPI_PATTERNS.md), [`LLM_CLIENT_REFERENCE.md`](LLM_CLIENT_REFERENCE.md) — эталонные паттерны кода проекта
 
 ## Чеклист перед production-развёртыванием

@@ -5,10 +5,9 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
-# В отличие от vera_rag_service здесь нет asyncpg/зависимостей с C-расширениями
-# без готовых wheel-пакетов под python:3.12-slim (fastapi/langgraph/aio-pika/
-# httpx/redis и т.д. — чистый Python или manylinux-wheels), поэтому build-тулчейн
-# (gcc/libpq-dev) в этом Dockerfile не нужен вовсе — не только в runtime-образе.
+RUN apt-get update \
+    && apt-get -y install --no-install-recommends libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \

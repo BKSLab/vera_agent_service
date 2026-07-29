@@ -1,10 +1,19 @@
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from redis.asyncio import Redis
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import text
 
+from app.admin import create_admin
 from app.api.v1.endpoints.health import create_health_router
+from app.api.v1.endpoints.message_feedback import router as message_feedback_router
+from app.api.v1.endpoints.session_feedback import router as session_feedback_router
 from app.checkpoint.redis_saver import get_redis_checkpointer
 from app.clients.http_client import external_api_http_client
 from app.clients.llm import get_chat_model
@@ -14,7 +23,10 @@ from app.clients.mcp_client import (
     get_mcp_client,
 )
 from app.core.config_logger import logger
+from app.core.rate_limit import limiter
 from app.core.settings import get_settings
+from app.db.session import engine
+from app.dependencies.services import build_chat_persistence_service
 from app.graph.build import build_graph
 from app.messaging.consumer import AgentRequestConsumer
 from app.observability.tracing import configure_tracing, shutdown_tracing
@@ -39,6 +51,11 @@ async def lifespan(app: FastAPI):
 
     try:
         async with AsyncExitStack() as stack:
+            logger.info('🚀 Проверка подключения к PostgreSQL...')
+            async with engine.connect() as connection:
+                await connection.execute(text('SELECT 1'))
+            logger.info('✅ PostgreSQL готов')
+
             logger.info('🚀 Подключение к Redis (LangGraph checkpointer)...')
             checkpointer = await asyncio.wait_for(
                 stack.enter_async_context(get_redis_checkpointer(settings.redis)),
@@ -72,6 +89,7 @@ async def lifespan(app: FastAPI):
                 dlq_name=settings.rabbitmq.rabbitmq_dlq,
                 graph=graph,
                 token_sink=session_bus.publish,
+                persistence_service_factory=build_chat_persistence_service,
             )
             logger.info('🚀 Подключение к RabbitMQ...')
             await asyncio.wait_for(consumer.start(), timeout=STARTUP_TIMEOUT_SECONDS)
@@ -82,6 +100,7 @@ async def lifespan(app: FastAPI):
                 create_health_router(
                     consumer=consumer,
                     redis_health_client=redis_health_client,
+                    db_engine=engine,
                     mcp_client=mcp_client,
                     mcp_settings=settings.mcp,
                 )
@@ -89,8 +108,16 @@ async def lifespan(app: FastAPI):
 
             yield
     finally:
+        await engine.dispose()
         shutdown_tracing()
 
 
 app = FastAPI(lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
+create_admin(app=app, engine=engine)
 app.include_router(create_sse_router(session_bus))
+app.include_router(message_feedback_router, prefix='/api/v1')
+app.include_router(session_feedback_router, prefix='/api/v1')

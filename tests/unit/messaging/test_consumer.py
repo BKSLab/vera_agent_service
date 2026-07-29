@@ -1,9 +1,12 @@
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.messaging.consumer import AgentRequestConsumer
 from app.observability.request_trace import get_request_trace
+from app.services.chat_persistence import ChatPersistenceService, TurnStartResult
 
 
 class _FakeMessage:
@@ -291,3 +294,59 @@ async def test_failure_after_mutating_tool_call_never_retries_and_acks():
             },
         )
     ]
+
+
+async def test_successful_message_persists_question_answer_and_sources():
+    graph = _FakeGraph(
+        [
+            [
+                {
+                    'event': 'on_chain_end',
+                    'data': {
+                        'output': {
+                            'retrieved_chunks': [{'document_id': 'doc-1'}],
+                            'tool_calls': ['vera_rag_kb'],
+                        }
+                    },
+                },
+                _token_event('Полный '),
+                _token_event('ответ'),
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    persistence_service = AsyncMock(spec=ChatPersistenceService)
+    persistence_service.start_turn.return_value = TurnStartResult(
+        created=True,
+        status='processing',
+    )
+
+    @asynccontextmanager
+    async def persistence_factory():
+        yield persistence_service
+
+    consumer = AgentRequestConsumer(
+        connection_url='amqp://unused',
+        queue_name='agent.requests',
+        dlq_name='agent.requests.dlq',
+        graph=graph,
+        token_sink=sink,
+        persistence_service_factory=persistence_factory,
+    )
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "message": "question"}'
+    )
+
+    await consumer._handle_message(message)
+
+    persistence_service.start_turn.assert_awaited_once_with(
+        session_id='s1',
+        request_id='r1',
+        user_id=None,
+        question='question',
+    )
+    complete_call = persistence_service.complete_turn.await_args.kwargs
+    assert complete_call['answer'] == 'Полный ответ'
+    assert complete_call['sources'] == [{'document_id': 'doc-1'}]
+    assert complete_call['technical_metadata']['tool_calls'] == ['vera_rag_kb']
+    assert message.acked is True

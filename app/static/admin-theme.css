@@ -1,0 +1,76 @@
+:root {
+    --background: #0A0A0A;
+    --surface: #1A1A1A;
+    --border: #2D2D2D;
+    --foreground: #F0F0F0;
+    --muted: #999999;
+    --accent: #F5B800;
+    --accent-hover: #E0A800;
+}
+
+body, html {
+    background-color: var(--background) !important;
+    color: var(--foreground) !important;
+}
+
+a { color: var(--accent) !important; }
+a:hover { color: var(--accent-hover) !important; }
+.text-muted { color: var(--muted) !important; }
+
+.navbar, .card, .form-control, .form-select, .dropdown-menu, .modal-content {
+    background-color: var(--surface) !important;
+    border-color: var(--border) !important;
+    color: var(--foreground) !important;
+}
+
+.table {
+    color: var(--foreground) !important;
+    border-color: var(--border) !important;
+}
+
+.table thead th {
+    background-color: #111 !important;
+    color: var(--muted) !important;
+}
+
+.table tbody tr:hover { background-color: #252525 !important; }
+
+.btn-primary {
+    background-color: var(--accent) !important;
+    border-color: var(--accent) !important;
+    color: #0A0A0A !important;
+    font-weight: 600;
+}
+
+.btn-primary:hover {
+    background-color: var(--accent-hover) !important;
+    border-color: var(--accent-hover) !important;
+}
+
+.form-control:focus, .form-select:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 2px rgba(245, 184, 0, 0.25) !important;
+}
+
+.message-label {
+    color: var(--accent);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.message-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.target-turn {
+    border: 2px solid var(--accent) !important;
+    box-shadow: 0 0 0 3px rgba(245, 184, 0, 0.15);
+}
+
+pre {
+    color: var(--foreground);
+    white-space: pre-wrap;
+    word-break: break-word;
+}

@@ -8,9 +8,8 @@ set -e
 # найти свои внутренние модули (api, core и т.д.).
 export PYTHONPATH="/app:/app/app:${PYTHONPATH}"
 
-# Нет реляционной БД/миграций в этом сервисе (AGENT_SERVICE_PLAN.md,
-# раздел 0.1 — Redis используется только как checkpointer с TTL, не как
-# хранилище со схемой) — шаг alembic upgrade head здесь не нужен.
+echo "application of migrations"
+alembic upgrade head
 
 # ВАЖНО: HYPERCORN_WORKERS должен оставаться 1 (см. .env.example) —
 # per-request SSE-очередь и RabbitMQ-consumer живут в памяти одного
