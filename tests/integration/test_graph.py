@@ -16,6 +16,8 @@ from langchain_openai import ChatOpenAI
 from app.clients.mcp_client import get_mcp_client, get_tools_with_retry
 from app.core.settings import McpSettings
 from app.graph.build import build_graph
+from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
+from app.messaging.schemas import AgentRequestMessage
 from tests.fixtures.mock_mcp_server import create_mock_mcp_app, run_mock_mcp_server
 
 pytestmark = pytest.mark.integration
@@ -83,6 +85,42 @@ def _stream_response(pieces: list[str]) -> httpx.Response:
     ]
     body = ''.join(f'data: {json.dumps(chunk)}\n\n' for chunk in chunks) + 'data: [DONE]\n\n'
     return httpx.Response(200, content=body.encode('utf-8'), headers={'content-type': 'text/event-stream'})
+
+
+def _stream_tool_call_response(name: str, arguments: dict) -> httpx.Response:
+    chunk = {
+        'id': 'x',
+        'object': 'chat.completion.chunk',
+        'created': 1,
+        'model': 'test-model',
+        'choices': [
+            {
+                'index': 0,
+                'delta': {
+                    'role': 'assistant',
+                    'content': None,
+                    'tool_calls': [
+                        {
+                            'index': 0,
+                            'id': 'call_1',
+                            'type': 'function',
+                            'function': {
+                                'name': name,
+                                'arguments': json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                'finish_reason': 'tool_calls',
+            }
+        ],
+    }
+    body = f'data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n'
+    return httpx.Response(
+        200,
+        content=body.encode('utf-8'),
+        headers={'content-type': 'text/event-stream'},
+    )
 
 
 def _build_chat_model(handler) -> ChatOpenAI:
@@ -305,3 +343,70 @@ async def test_consultation_email_is_called_once_with_complete_arguments():
         assert result['messages'][-1].content == (
             'Документ отправлен на user@example.com.'
         )
+
+
+async def test_consumer_collects_authoritative_metadata_from_real_graph_events():
+    chunks = [
+        {
+            'chunk_id': 'c1',
+            'source_title': 'ФЗ-181, Статья 21',
+            'text': 'Квота составляет 2 процента',
+        }
+    ]
+    app = create_mock_mcp_app(chunks=chunks)
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(
+            mcp_server_url=url,
+            mcp_call_timeout_seconds=5.0,
+            mcp_call_retries=1,
+        )
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(
+            mcp_client,
+            retries=1,
+            timeout_seconds=5.0,
+        )
+
+        def handler(request):
+            request_payload = json.loads(request.content)
+            if request_payload.get('tools'):
+                return _stream_tool_call_response(
+                    'vera_rag_kb',
+                    {'query': 'квота'},
+                )
+            return _stream_response(['Квота ', '2%, источник ФЗ-181.'])
+
+        chat_model = _build_chat_model(handler)
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        async def unused_token_sink(_request_id: str, _event: dict) -> None:
+            pass
+
+        consumer = AgentRequestConsumer(
+            connection_url='amqp://unused',
+            queue_name='agent.requests',
+            dlq_name='agent.requests.dlq',
+            graph=graph,
+            token_sink=unused_token_sink,
+        )
+        payload = AgentRequestMessage(
+            session_id='real-events-session',
+            request_id='real-events-request',
+            user_id='user-1',
+            message='Какая квота на трудоустройство инвалидов?',
+        )
+        persistence_data = TurnPersistenceData()
+
+        answer = ''.join(
+            [
+                chunk
+                async for chunk in consumer._stream_answer(
+                    payload,
+                    persistence_data,
+                )
+            ]
+        )
+
+        assert answer == 'Квота 2%, источник ФЗ-181.'
+        assert persistence_data.tool_calls == ['vera_rag_kb']
+        assert persistence_data.sources == chunks

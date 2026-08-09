@@ -539,7 +539,9 @@ class AgentRequestConsumer:
     ) -> AsyncIterator[str]:
         config = {'configurable': {'thread_id': payload.session_id}}
         async for event in self._graph.astream_events(_initial_state(payload), config=config, version='v2'):
-            if event.get('event') == 'on_chain_end':
+            # Node-level outputs повторяют `tool_calls`/`retrieved_chunks`.
+            # Единственный authoritative snapshot — корневой graph output.
+            if event.get('event') == 'on_chain_end' and not event.get('parent_ids'):
                 output = event.get('data', {}).get('output')
                 if isinstance(output, dict):
                     sources = output.get('retrieved_chunks')
@@ -547,8 +549,12 @@ class AgentRequestConsumer:
                         persistence_data.sources = sources
                     tool_calls = output.get('tool_calls')
                     if isinstance(tool_calls, list):
-                        persistence_data.tool_calls.extend(
-                            tool_name for tool_name in tool_calls if isinstance(tool_name, str)
+                        persistence_data.tool_calls = list(
+                            dict.fromkeys(
+                                tool_name
+                                for tool_name in tool_calls
+                                if isinstance(tool_name, str)
+                            )
                         )
             if event.get('event') != 'on_chat_model_stream':
                 continue

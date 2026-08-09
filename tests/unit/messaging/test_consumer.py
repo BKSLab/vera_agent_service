@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.messaging.consumer import AgentRequestConsumer
+from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
+from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import get_request_trace
 from app.services.chat_persistence import ChatPersistenceService, TurnStartResult
 
@@ -363,3 +364,65 @@ async def test_successful_message_persists_question_answer_and_sources():
     assert complete_call['sources'] == [{'document_id': 'doc-1'}]
     assert complete_call['technical_metadata']['tool_calls'] == ['vera_rag_kb']
     assert message.acked is True
+
+
+async def test_stream_answer_uses_only_root_graph_metadata():
+    child_sources = [{'document_id': 'child'}]
+    authoritative_sources = [{'document_id': 'root'}]
+    graph = _FakeGraph(
+        [
+            [
+                {
+                    'event': 'on_chain_end',
+                    'parent_ids': ['root-run'],
+                    'data': {
+                        'output': {
+                            'retrieved_chunks': child_sources,
+                            'tool_calls': ['vera_rag_kb'],
+                        }
+                    },
+                },
+                {
+                    'event': 'on_chain_end',
+                    'parent_ids': [],
+                    'data': {
+                        'output': {
+                            'retrieved_chunks': authoritative_sources,
+                            'tool_calls': [
+                                'vera_rag_kb',
+                                'vera_rag_kb',
+                                'send_consultation_email',
+                            ],
+                        }
+                    },
+                },
+                _token_event('Ответ'),
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Вопрос',
+    )
+    persistence_data = TurnPersistenceData()
+
+    answer = ''.join(
+        [
+            chunk
+            async for chunk in consumer._stream_answer(
+                payload,
+                persistence_data,
+            )
+        ]
+    )
+
+    assert answer == 'Ответ'
+    assert persistence_data.sources == authoritative_sources
+    assert persistence_data.tool_calls == [
+        'vera_rag_kb',
+        'send_consultation_email',
+    ]
