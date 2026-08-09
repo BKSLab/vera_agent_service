@@ -86,6 +86,7 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
                         {
                             'session_id': session_id,
                             'request_id': request_id,
+                            'user_id': 'integration-user',
                             'message': 'Какая квота?',
                         }
                     ).encode()

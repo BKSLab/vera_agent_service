@@ -130,7 +130,9 @@ async def test_successful_message_streams_tokens_and_acks():
     graph = _FakeGraph([[_token_event('Квота'), _token_event(' 2%.')]])
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
-    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
 
     await consumer._handle_message(message)
 
@@ -148,7 +150,7 @@ async def test_request_id_routes_delivery_without_changing_session_history_key()
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
     message = _FakeMessage(
-        body=b'{"session_id": "conversation-1", "request_id": "request-1", "message": "?"}'
+        body=b'{"session_id": "conversation-1", "request_id": "request-1", "user_id": "u1", "message": "?"}'
     )
 
     await consumer._handle_message(message)
@@ -173,7 +175,9 @@ async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
-    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
 
     await consumer._handle_message(message)
 
@@ -198,7 +202,9 @@ async def test_ignores_stream_events_without_confirmed_graph_node():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
-    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
 
     await consumer._handle_message(message)
 
@@ -218,7 +224,9 @@ async def test_failure_before_streaming_retries_then_succeeds():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
-    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
 
     await consumer._handle_message(message)
 
@@ -238,7 +246,9 @@ async def test_failure_before_streaming_exhausts_retries_goes_to_dlq():
     )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
-    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
 
     await consumer._handle_message(message)
 
@@ -254,7 +264,9 @@ async def test_failure_after_streaming_started_does_not_retry_and_acks():
     graph = _FakeGraph([[_token_event('Начало ответа'), RuntimeError('обрыв соединения с LLM')]])
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
-    message = _FakeMessage(body=b'{"session_id": "s1", "request_id": "r1", "message": "?"}')
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
 
     await consumer._handle_message(message)
 
@@ -274,7 +286,7 @@ async def test_failure_after_mutating_tool_call_never_retries_and_acks():
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
     message = _FakeMessage(
-        body=b'{"session_id": "s1", "request_id": "r1", "message": "send"}'
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "send"}'
     )
 
     await consumer._handle_message(message)
@@ -334,7 +346,7 @@ async def test_successful_message_persists_question_answer_and_sources():
         persistence_service_factory=persistence_factory,
     )
     message = _FakeMessage(
-        body=b'{"session_id": "s1", "request_id": "r1", "message": "question"}'
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "question"}'
     )
 
     await consumer._handle_message(message)
@@ -342,7 +354,7 @@ async def test_successful_message_persists_question_answer_and_sources():
     persistence_service.start_turn.assert_awaited_once_with(
         session_id='s1',
         request_id='r1',
-        user_id=None,
+        user_id='u1',
         anonymous_token_hash=None,
         question='question',
     )

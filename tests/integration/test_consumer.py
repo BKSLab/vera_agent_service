@@ -86,6 +86,7 @@ async def test_consumer_processes_published_message_end_to_end(unique_queue_name
                         {
                             'session_id': 'integration-session',
                             'request_id': 'integration-request',
+                            'user_id': 'integration-user',
                             'message': 'Какая квота?',
                         }
                     ).encode()

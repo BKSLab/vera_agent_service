@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from typing import Self
+
+from pydantic import BaseModel, Field, model_validator
 
 MAX_MESSAGE_LENGTH: int = 4000
 """Лимит длины пользовательского сообщения — защита от аномально больших
@@ -17,8 +19,15 @@ class AgentRequestMessage(BaseModel):
     и не участвует в накоплении истории.
     """
 
-    session_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1, max_length=100)
     request_id: str = Field(min_length=1, max_length=100)
-    user_id: str | None = Field(default=None, max_length=255)
+    user_id: str | None = Field(default=None, min_length=1, max_length=255)
     anonymous_token_hash: str | None = Field(default=None, min_length=64, max_length=64)
     message: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
+
+    @model_validator(mode='after')
+    def validate_owner(self) -> Self:
+        """Запрещает создание сессии без механизма владения."""
+        if self.user_id is None and self.anonymous_token_hash is None:
+            raise ValueError('Должен быть указан владелец запроса')
+        return self

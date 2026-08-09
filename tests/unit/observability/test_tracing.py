@@ -156,7 +156,7 @@ def _stream_event(content: str, node: str = 'generate_direct') -> dict:
 class _FakeMessage:
     def __init__(
         self,
-        body: bytes = b'{"session_id":"s1","request_id":"r1","message":"question"}',
+        body: bytes = b'{"session_id":"s1","request_id":"r1","user_id":"u1","message":"question"}',
     ):
         self.body = body
         self.acked = False
