@@ -1,11 +1,15 @@
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.chat_session import ChatSession
 from app.exceptions.chat_session import ChatSessionRepositoryError
+
+
+SESSION_ID_CONSTRAINT = 'uq_vera_chat_sessions_session_id'
 
 
 class ChatSessionRepository:
@@ -41,6 +45,46 @@ class ChatSessionRepository:
                 .limit(1)
             )
             return result.unique().scalar_one_or_none()
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatSessionRepositoryError(str(error)) from error
+
+    async def lock_or_create_for_turn(
+        self,
+        *,
+        session_id: str,
+        user_id: str | None,
+        anonymous_token_hash: str | None,
+    ) -> ChatSession:
+        """Создаёт при необходимости и блокирует сессию до commit реплики."""
+        try:
+            await self.db_session.execute(
+                insert(ChatSession)
+                .values(
+                    session_id=session_id,
+                    user_id=user_id,
+                    anonymous_token_hash=(
+                        anonymous_token_hash if user_id is None else None
+                    ),
+                )
+                .on_conflict_do_nothing(constraint=SESSION_ID_CONSTRAINT)
+            )
+            result = await self.db_session.execute(
+                select(ChatSession)
+                .where(ChatSession.session_id == session_id)
+                .with_for_update()
+            )
+            return result.unique().scalar_one()
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatSessionRepositoryError(str(error)) from error
+
+    async def touch_for_turn(self, chat_session: ChatSession) -> ChatSession:
+        """Обновляет сессию без commit внутри транзакции создания реплики."""
+        try:
+            chat_session.last_activity_at = datetime.now(UTC)
+            await self.db_session.flush()
+            return chat_session
         except SQLAlchemyError as error:
             await self.db_session.rollback()
             raise ChatSessionRepositoryError(str(error)) from error

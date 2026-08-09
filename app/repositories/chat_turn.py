@@ -19,6 +19,25 @@ from app.db.models.session_feedback import SessionFeedback
 from app.exceptions.chat_turn import ChatTurnAlreadyExistsError, ChatTurnRepositoryError
 
 
+REQUEST_ID_CONSTRAINT = 'uq_vera_chat_turns_request_id'
+
+
+def _get_constraint_name(error: IntegrityError) -> str | None:
+    """Извлекает имя PostgreSQL constraint из psycopg/asyncpg adapters."""
+    candidates = (error.orig, getattr(error.orig, '__cause__', None))
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        constraint_name = getattr(candidate, 'constraint_name', None)
+        if constraint_name:
+            return constraint_name
+        diagnostic = getattr(candidate, 'diag', None)
+        constraint_name = getattr(diagnostic, 'constraint_name', None)
+        if constraint_name:
+            return constraint_name
+    return None
+
+
 @dataclass(frozen=True)
 class RankedChatTurn:
     """Реплика и её релевантность полнотекстовому запросу."""
@@ -156,7 +175,12 @@ class ChatTurnRepository:
             return chat_turn
         except IntegrityError as error:
             await self.db_session.rollback()
-            raise ChatTurnAlreadyExistsError from error
+            constraint_name = _get_constraint_name(error)
+            if constraint_name == REQUEST_ID_CONSTRAINT:
+                raise ChatTurnAlreadyExistsError from error
+            raise ChatTurnRepositoryError(
+                f'Нарушено ограничение {constraint_name or "unknown"}.'
+            ) from error
         except SQLAlchemyError as error:
             await self.db_session.rollback()
             raise ChatTurnRepositoryError(str(error)) from error

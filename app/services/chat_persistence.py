@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import (
     STATUS_PROCESSING,
     TERMINAL_STATUSES,
@@ -80,27 +79,22 @@ class ChatPersistenceService:
                     lease_seconds=lease_seconds,
                 )
 
-            chat_session = await self.chat_session_repository.get_by_session_id(session_id)
-            if chat_session is None:
-                chat_session = await self.chat_session_repository.save(
-                    ChatSession(
-                        session_id=session_id,
-                        user_id=user_id,
-                        anonymous_token_hash=(
-                            anonymous_token_hash if user_id is None else None
-                        ),
-                    )
-                )
-            else:
-                ensure_chat_session_access(
-                    chat_session,
-                    user_id=user_id,
-                    anonymous_token_hash=anonymous_token_hash,
-                )
-                if chat_session.user_id is None and user_id is not None:
-                    chat_session.user_id = user_id
-                    chat_session.anonymous_token_hash = None
-                chat_session = await self.chat_session_repository.touch(chat_session)
+            chat_session = await self.chat_session_repository.lock_or_create_for_turn(
+                session_id=session_id,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
+            ensure_chat_session_access(
+                chat_session,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
+            if chat_session.user_id is None and user_id is not None:
+                chat_session.user_id = user_id
+                chat_session.anonymous_token_hash = None
+            chat_session = await self.chat_session_repository.touch_for_turn(
+                chat_session
+            )
 
             sequence_number = await self.chat_turn_repository.get_next_sequence_number(
                 chat_session.id

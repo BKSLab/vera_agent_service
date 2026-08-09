@@ -24,8 +24,8 @@ async def test_start_turn_creates_session_and_processing_turn():
         session_id='session-1',
         user_id='user-1',
     )
-    session_repository.get_by_session_id.return_value = None
-    session_repository.save.return_value = saved_session
+    session_repository.lock_or_create_for_turn.return_value = saved_session
+    session_repository.touch_for_turn.return_value = saved_session
     turn_repository.get_by_request_id.return_value = None
     turn_repository.get_next_sequence_number.return_value = 1
     service = ChatPersistenceService(session_repository, turn_repository)
@@ -88,7 +88,7 @@ async def test_start_turn_returns_completed_turn_without_creating_duplicate():
 async def test_start_turn_rejects_wrong_anonymous_owner():
     session_repository = AsyncMock(spec=ChatSessionRepository)
     turn_repository = AsyncMock(spec=ChatTurnRepository)
-    session_repository.get_by_session_id.return_value = ChatSession(
+    session_repository.lock_or_create_for_turn.return_value = ChatSession(
         id=uuid4(),
         session_id='session-1',
         anonymous_token_hash='a' * 64,
