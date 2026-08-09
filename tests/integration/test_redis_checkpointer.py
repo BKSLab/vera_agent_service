@@ -13,6 +13,11 @@ from langgraph.graph import StateGraph
 from app.checkpoint.redis_saver import get_redis_checkpointer
 from app.core.settings import RedisSettings
 from app.graph.state import AgentState
+from app.messaging.consumer import _initial_state as _consumer_initial_state
+from app.messaging.schemas import AgentRequestMessage
+from app.repositories.chat_session import ChatSessionRepository
+from app.repositories.chat_turn import ChatTurnRepository
+from app.services.chat_persistence import START_CLAIMED, ChatPersistenceService
 
 pytestmark = pytest.mark.integration
 
@@ -27,6 +32,39 @@ def _build_echo_graph():
     builder.set_entry_point('echo')
     builder.set_finish_point('echo')
     return builder
+
+
+def _build_flaky_graph():
+    attempts = 0
+
+    def flaky_node(state: AgentState) -> dict:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError('Сбой после сохранения initial checkpoint')
+        return {}
+
+    builder = StateGraph(AgentState)
+    builder.add_node('flaky', flaky_node)
+    builder.set_entry_point('flaky')
+    builder.set_finish_point('flaky')
+    return builder
+
+
+async def _assert_failed_checkpoint_contains_original_message(
+    checkpointer,
+    config: dict,
+    payload: AgentRequestMessage,
+) -> None:
+    checkpoint_tuple = await checkpointer.aget_tuple(config)
+    assert checkpoint_tuple is not None
+    messages = checkpoint_tuple.checkpoint['channel_values']['messages']
+    human_messages = [
+        message for message in messages if isinstance(message, HumanMessage)
+    ]
+    assert [(message.id, message.content) for message in human_messages] == [
+        (payload.request_id, payload.message)
+    ]
 
 
 def _initial_state(text: str) -> dict:
@@ -102,3 +140,100 @@ async def test_checkpointer_setup_fails_fast_when_redis_unreachable():
         async with asyncio.timeout(10.0):
             async with get_redis_checkpointer(settings):
                 pass
+
+
+async def test_retry_same_request_does_not_duplicate_human_message_in_real_redis():
+    settings = RedisSettings(
+        redis_host='localhost',
+        redis_port=6379,
+        redis_session_ttl_seconds=86400,
+    )
+    payload = AgentRequestMessage(
+        session_id=str(uuid.uuid4()),
+        request_id=str(uuid.uuid4()),
+        user_id=None,
+        anonymous_token_hash='a' * 64,
+        message='Вопрос с повторной попыткой',
+    )
+    config = {'configurable': {'thread_id': payload.session_id}}
+
+    async with get_redis_checkpointer(settings) as checkpointer:
+        graph = _build_flaky_graph().compile(checkpointer=checkpointer)
+        with pytest.raises(RuntimeError, match='initial checkpoint'):
+            await graph.ainvoke(_consumer_initial_state(payload), config=config)
+        await _assert_failed_checkpoint_contains_original_message(
+            checkpointer,
+            config,
+            payload,
+        )
+
+        result = await graph.ainvoke(_consumer_initial_state(payload), config=config)
+
+    human_messages = [
+        message for message in result['messages'] if isinstance(message, HumanMessage)
+    ]
+    assert [(message.id, message.content) for message in human_messages] == [
+        (payload.request_id, payload.message)
+    ]
+
+
+async def test_stale_lease_retry_does_not_duplicate_human_message_in_real_redis(
+    db_session,
+):
+    settings = RedisSettings(
+        redis_host='localhost',
+        redis_port=6379,
+        redis_session_ttl_seconds=86400,
+    )
+    payload = AgentRequestMessage(
+        session_id=str(uuid.uuid4()),
+        request_id=str(uuid.uuid4()),
+        user_id=None,
+        anonymous_token_hash='a' * 64,
+        message='Вопрос после перезахвата аренды',
+    )
+    persistence_service = ChatPersistenceService(
+        ChatSessionRepository(db_session),
+        ChatTurnRepository(db_session),
+    )
+    first_start = await persistence_service.start_turn(
+        session_id=payload.session_id,
+        request_id=payload.request_id,
+        user_id=payload.user_id,
+        anonymous_token_hash=payload.anonymous_token_hash,
+        question=payload.message,
+        worker_id='worker-before-crash',
+        lease_seconds=0.05,
+    )
+    config = {'configurable': {'thread_id': payload.session_id}}
+
+    async with get_redis_checkpointer(settings) as checkpointer:
+        graph = _build_flaky_graph().compile(checkpointer=checkpointer)
+        with pytest.raises(RuntimeError, match='initial checkpoint'):
+            await graph.ainvoke(_consumer_initial_state(payload), config=config)
+        await _assert_failed_checkpoint_contains_original_message(
+            checkpointer,
+            config,
+            payload,
+        )
+
+        await asyncio.sleep(0.1)
+        reclaimed_start = await persistence_service.start_turn(
+            session_id=payload.session_id,
+            request_id=payload.request_id,
+            user_id=payload.user_id,
+            anonymous_token_hash=payload.anonymous_token_hash,
+            question=payload.message,
+            worker_id='worker-after-crash',
+            lease_seconds=900.0,
+        )
+        result = await graph.ainvoke(_consumer_initial_state(payload), config=config)
+
+    human_messages = [
+        message for message in result['messages'] if isinstance(message, HumanMessage)
+    ]
+    assert first_start.outcome == START_CLAIMED
+    assert reclaimed_start.outcome == START_CLAIMED
+    assert [(message.id, message.content) for message in human_messages] == [
+        (payload.request_id, payload.message)
+    ]

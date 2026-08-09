@@ -185,7 +185,7 @@ def _initial_state(payload: AgentRequestMessage) -> dict:
     return {
         'session_id': payload.session_id,
         'user_id': payload.user_id,
-        'messages': [HumanMessage(content=payload.message)],
+        'messages': [HumanMessage(content=payload.message, id=payload.request_id)],
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,

@@ -167,6 +167,7 @@ async def test_request_id_routes_delivery_without_changing_session_history_key()
         ('request-1', {'type': 'done'}),
     ]
     assert graph.states[0]['session_id'] == 'conversation-1'
+    assert graph.states[0]['messages'][0].id == 'request-1'
     assert graph.configs[0] == {'configurable': {'thread_id': 'conversation-1'}}
 
 
