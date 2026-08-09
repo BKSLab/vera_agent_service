@@ -18,9 +18,21 @@ _provider: TracerProvider | None = None
 _shutdown = False
 
 
-def _create_langchain_trace_config() -> TraceConfig:
-    """Экспортирует полное содержимое LangChain/LangGraph spans в Phoenix."""
-    return TraceConfig()
+def _create_langchain_trace_config(
+    trace_content_enabled: bool = False,
+) -> TraceConfig:
+    """Скрывает содержимое LangChain/LangGraph spans без явного opt-in."""
+    hide_content = not trace_content_enabled
+    return TraceConfig(
+        hide_inputs=hide_content,
+        hide_outputs=hide_content,
+        hide_input_messages=hide_content,
+        hide_output_messages=hide_content,
+        hide_input_text=hide_content,
+        hide_output_text=hide_content,
+        hide_prompts=hide_content,
+        hide_choices=hide_content,
+    )
 
 
 def configure_tracing(settings: ObservabilitySettings) -> TracerProvider:
@@ -46,7 +58,7 @@ def configure_tracing(settings: ObservabilitySettings) -> TracerProvider:
     trace.set_tracer_provider(provider)
     LangChainInstrumentor().instrument(
         tracer_provider=provider,
-        config=_create_langchain_trace_config(),
+        config=_create_langchain_trace_config(settings.trace_content_enabled),
     )
 
     _provider = provider
@@ -126,7 +138,10 @@ def _reset_otel_trace_globals() -> None:
     trace._TRACER_PROVIDER_SET_ONCE = Once()
 
 
-def reset_for_tests(exporter: SpanExporter | None = None) -> TracerProvider:
+def reset_for_tests(
+    exporter: SpanExporter | None = None,
+    trace_content_enabled: bool = False,
+) -> TracerProvider:
     """Только для тестов. Настраивает провайдер с указанным экспортёром
     (например `InMemorySpanExporter`), чтобы проверить фактически
     созданные spans без реального Phoenix.
@@ -151,7 +166,7 @@ def reset_for_tests(exporter: SpanExporter | None = None) -> TracerProvider:
         instrumentor.uninstrument()
     instrumentor.instrument(
         tracer_provider=provider,
-        config=_create_langchain_trace_config(),
+        config=_create_langchain_trace_config(trace_content_enabled),
     )
 
     _provider = provider

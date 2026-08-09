@@ -34,9 +34,8 @@ services:
       - phoenix_data:/mnt/data
     environment:
       PHOENIX_WORKING_DIR: /mnt/data
-    ports:
-      - "6006:6006"  # UI + OTLP/HTTP (см. PHOENIX_OTLP_ENDPOINT в .env.example)
-      - "4317:4317"  # OTLP/gRPC — не используется этим сервисом (HTTP-экспортёр), порт на будущее
+    expose:
+      - "6006"  # UI + OTLP/HTTP доступны только сервисам внутренней compose-сети
 
   agent_service:
     container_name: vera_agent_service

@@ -226,6 +226,7 @@ class AgentRequestConsumer:
         persistence_retries: int = DEFAULT_PERSISTENCE_RETRIES,
         lease_seconds: float = DEFAULT_LEASE_SECONDS,
         worker_id: str | None = None,
+        trace_content_enabled: bool = False,
     ):
         self._connection_url = connection_url
         self._queue_name = queue_name
@@ -238,6 +239,7 @@ class AgentRequestConsumer:
         self._persistence_retries = persistence_retries
         self._lease_seconds = lease_seconds
         self._worker_id = worker_id or f'{gethostname()}:{getpid()}'
+        self._trace_content_enabled = trace_content_enabled
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
         self._queue: aio_pika.abc.AbstractQueue | None = None
@@ -652,13 +654,15 @@ class AgentRequestConsumer:
         if error is not None:
             _mark_span_error(span, error)
 
-    @staticmethod
     def _set_content(
+        self,
         span: Span,
         value_attribute: str,
         mime_type_attribute: str,
         content: str,
     ) -> None:
+        if not self._trace_content_enabled:
+            return
         span.set_attribute(value_attribute, content)
         span.set_attribute(mime_type_attribute, 'text/plain')
 

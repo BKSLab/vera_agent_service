@@ -185,27 +185,38 @@ def _finished_span(name: str):
     return next(span for span in _exporter.get_finished_spans() if span.name == name)
 
 
-def _build_consumer(graph):
+def _build_consumer(graph, trace_content_enabled: bool = False):
     return AgentRequestConsumer(
         connection_url='amqp://unused',
         queue_name='agent.requests',
         dlq_name='agent.requests.dlq',
         graph=graph,
         token_sink=_noop_sink,
+        trace_content_enabled=trace_content_enabled,
     )
 
 
 async def test_tool_call_creates_logical_span_with_aggregates():
-    await call_tool_with_retry(_FakeTool(), {'query': 'q'}, retries=1, timeout_seconds=1.0)
+    query = 'Секретный поисковый запрос'
+    result_text = 'Секретный результат поиска'
+    await call_tool_with_retry(
+        _FakeTool([{'text': result_text}]),
+        {'query': query},
+        retries=1,
+        timeout_seconds=1.0,
+    )
 
     span = _finished_span('tool.vera_rag_kb')
     assert span.attributes['openinference.span.kind'] == 'TOOL'
-    assert span.attributes['input.value'] == '{"query": "q"}'
-    assert span.attributes['input.mime_type'] == 'application/json'
-    assert span.attributes['output.value'] == '{"chunks": []}'
-    assert span.attributes['output.mime_type'] == 'application/json'
+    assert span.attributes['tool.input.query_char_count'] == len(query)
+    assert span.attributes['tool.result.chunk_count'] == 1
     assert span.attributes['tool.retry.count'] == 0
-    assert span.attributes['tool.outcome'] == 'empty'
+    assert span.attributes['tool.outcome'] == 'ok'
+    serialized_attributes = str(dict(span.attributes))
+    assert query not in serialized_attributes
+    assert result_text not in serialized_attributes
+    assert 'input.value' not in span.attributes
+    assert 'output.value' not in span.attributes
 
 
 async def test_mutating_tool_span_excludes_consultation_and_email():
@@ -244,7 +255,7 @@ async def test_publish_many_tokens_does_not_create_sse_spans():
     assert not [span for span in _exporter.get_finished_spans() if span.name == 'sse.deliver']
 
 
-async def test_message_creates_one_agent_root_with_full_content():
+async def test_message_creates_one_agent_root_without_full_content_by_default():
     graph = _FakeGraph(
         [
             _stream_event('A'),
@@ -264,13 +275,18 @@ async def test_message_creates_one_agent_root_with_full_content():
     assert span.attributes['agent.response.chunk_count'] == 2
     assert span.attributes['agent.response.char_count'] == 2
     assert span.attributes['agent.outcome'] == 'done'
-    assert span.attributes['input.value'] == 'question'
-    assert span.attributes['output.value'] == 'AБ'
+    assert 'input.value' not in span.attributes
+    assert 'input.mime_type' not in span.attributes
+    assert 'output.value' not in span.attributes
+    assert 'output.mime_type' not in span.attributes
+    serialized_attributes = str(dict(span.attributes))
+    assert 'question' not in serialized_attributes
+    assert 'AБ' not in serialized_attributes
 
 
-async def test_root_contains_full_current_message_and_final_output():
+async def test_root_full_content_requires_explicit_opt_in():
     graph = _FakeGraph([_stream_event('123456')])
-    consumer = _build_consumer(graph)
+    consumer = _build_consumer(graph, trace_content_enabled=True)
 
     await consumer._handle_message(
         _FakeMessage(
@@ -340,7 +356,8 @@ async def test_retry_before_streaming_resets_output_and_is_counted():
     root = _finished_span('vera.agent.request')
     assert graph.call_count == 2
     assert root.attributes['agent.retry.count'] == 1
-    assert root.attributes['output.value'] == 'final'
+    assert root.attributes['agent.response.char_count'] == 5
+    assert 'output.value' not in root.attributes
     assert root.attributes['agent.response.chunk_count'] == 1
     assert root.status.status_code is StatusCode.UNSET
 
@@ -364,7 +381,8 @@ async def test_error_after_first_token_is_terminal_root_error_without_retry():
     assert message.acked is True
     assert root.attributes['agent.outcome'] == 'error'
     assert root.attributes['agent.streaming.started'] is True
-    assert root.attributes['output.value'] == 'partial'
+    assert root.attributes['agent.response.char_count'] == 7
+    assert 'output.value' not in root.attributes
     assert root.status.status_code is StatusCode.ERROR
 
 
@@ -442,13 +460,28 @@ def test_exporter_uses_phoenix_project_header(monkeypatch):
     }
 
 
-def test_langchain_auto_spans_capture_full_conversation_content():
+def test_langchain_auto_spans_hide_conversation_content_by_default():
     config = _create_langchain_trace_config()
+
+    assert config.hide_inputs is True
+    assert config.hide_outputs is True
+    assert config.hide_input_messages is True
+    assert config.hide_output_messages is True
+    assert config.hide_input_text is True
+    assert config.hide_output_text is True
+    assert config.hide_prompts is True
+    assert config.hide_choices is True
+
+
+def test_langchain_auto_spans_full_content_requires_explicit_opt_in():
+    config = _create_langchain_trace_config(trace_content_enabled=True)
 
     assert config.hide_inputs is False
     assert config.hide_outputs is False
     assert config.hide_input_messages is False
     assert config.hide_output_messages is False
+    assert config.hide_input_text is False
+    assert config.hide_output_text is False
     assert config.hide_prompts is False
     assert config.hide_choices is False
 

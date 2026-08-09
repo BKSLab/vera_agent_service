@@ -150,13 +150,13 @@ async def call_tool_with_retry(
             ошибка выполнения тула на MCP-сервере или неожиданный формат
             ответа (раздел 0.1: для вызывающего кода все три равнозначны).
     """
+    query = arguments.get('query')
     with get_tracer().start_as_current_span(
         f'tool.{tool.name}',
         attributes={
             SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.TOOL.value,
             'tool.name': tool.name,
-            SpanAttributes.INPUT_VALUE: json.dumps(arguments, ensure_ascii=False, default=str),
-            SpanAttributes.INPUT_MIME_TYPE: 'application/json',
+            'tool.input.query_char_count': len(query) if isinstance(query, str) else 0,
         },
     ) as span:
         last_error: Exception | None = None
@@ -169,11 +169,6 @@ async def call_tool_with_retry(
                 span.set_attribute('tool.retry.count', retry_count)
                 span.set_attribute('tool.result.chunk_count', len(chunks))
                 span.set_attribute('tool.outcome', 'ok' if chunks else 'empty')
-                span.set_attribute(
-                    SpanAttributes.OUTPUT_VALUE,
-                    json.dumps(result, ensure_ascii=False, default=str),
-                )
-                span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, 'application/json')
                 trace_data = get_request_trace()
                 if trace_data is not None:
                     trace_data.mcp_retry_count += retry_count

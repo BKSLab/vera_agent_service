@@ -152,6 +152,8 @@ class ObservabilitySettings(SettingsBase):
     phoenix_enabled: bool = True
     phoenix_otlp_endpoint: str = 'http://localhost:6006/v1/traces'
     phoenix_project_name: str = 'vera-local'
+    trace_content_enabled: bool = False
+    """Явный opt-in на экспорт полного содержимого диалогов и LLM-вызовов."""
 
 
 class Settings(BaseSettings):

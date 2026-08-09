@@ -12,12 +12,14 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from app.clients.mcp_client import get_mcp_client, get_tools_with_retry
 from app.core.settings import McpSettings
 from app.graph.build import build_graph
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
+from app.observability.tracing import reset_for_tests
 from tests.fixtures.mock_mcp_server import create_mock_mcp_app, run_mock_mcp_server
 
 pytestmark = pytest.mark.integration
@@ -343,6 +345,56 @@ async def test_consultation_email_is_called_once_with_complete_arguments():
         assert result['messages'][-1].content == (
             'Документ отправлен на user@example.com.'
         )
+
+
+async def test_automatic_email_spans_redact_consultation_and_recipient():
+    exporter = InMemorySpanExporter()
+    reset_for_tests(exporter)
+    requests: list[dict] = []
+    app = create_mock_mcp_app(consultation_requests=requests)
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(
+            mcp_server_url=url,
+            mcp_call_timeout_seconds=5.0,
+            mcp_call_retries=1,
+            mcp_consultation_email_timeout_seconds=5.0,
+        )
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(
+            mcp_client,
+            retries=1,
+            timeout_seconds=5.0,
+        )
+        consultation_text = 'Уникальный секретный текст консультации VERA-022'
+        recipient = 'vera-022-private@example.test'
+        chat_model = _build_chat_model(
+            _conversational_handler(
+                tool_name='send_consultation_email',
+                tool_arguments={
+                    'consultation_text': consultation_text,
+                    'email': recipient,
+                },
+                final_pieces=['Документ отправлен.'],
+            )
+        )
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        await graph.ainvoke(_initial_state(f'Отправь консультацию на {recipient}'))
+
+    assert requests == [
+        {
+            'consultation_text': consultation_text,
+            'email': recipient,
+        }
+    ]
+    spans = exporter.get_finished_spans()
+    automatic_email_spans = [
+        span for span in spans if span.name == 'send_consultation_email'
+    ]
+    assert automatic_email_spans
+    serialized_attributes = str([dict(span.attributes) for span in spans])
+    assert consultation_text not in serialized_attributes
+    assert recipient not in serialized_attributes
 
 
 async def test_consumer_collects_authoritative_metadata_from_real_graph_events():
