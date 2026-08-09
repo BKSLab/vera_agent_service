@@ -1,4 +1,5 @@
 from functools import lru_cache
+from urllib.parse import quote
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,11 +39,14 @@ class DBSettings(SettingsBase):
     @property
     def url_connect(self) -> str:
         """Формирует строку асинхронного подключения SQLAlchemy."""
+        user = quote(self.postgres_user, safe='')
+        password = quote(self.postgres_password.get_secret_value(), safe='')
+        database = quote(self.postgres_name, safe='')
         return (
-            f'postgresql+asyncpg://{self.postgres_user}:'
-            f'{self.postgres_password.get_secret_value()}@'
+            f'postgresql+asyncpg://{user}:'
+            f'{password}@'
             f'{self.postgres_host}:{self.postgres_port}/'
-            f'{self.postgres_name}'
+            f'{database}'
         )
 
 
@@ -60,11 +64,14 @@ class RabbitMQSettings(SettingsBase):
 
     @property
     def url_connect(self) -> str:
+        user = quote(self.rabbitmq_user, safe='')
+        password = quote(self.rabbitmq_password.get_secret_value(), safe='')
+        vhost = quote(self.rabbitmq_vhost, safe='')
         return (
-            f'amqp://{self.rabbitmq_user}:'
-            f'{self.rabbitmq_password.get_secret_value()}@'
+            f'amqp://{user}:'
+            f'{password}@'
             f'{self.rabbitmq_host}:{self.rabbitmq_port}/'
-            f'{self.rabbitmq_vhost}'
+            f'{vhost}'
         )
 
 
@@ -83,7 +90,11 @@ class RedisSettings(SettingsBase):
 
     @property
     def url_connect(self) -> str:
-        auth = f':{self.redis_password.get_secret_value()}@' if self.redis_password else ''
+        auth = (
+            f':{quote(self.redis_password.get_secret_value(), safe="")}@'
+            if self.redis_password
+            else ''
+        )
         return f'redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}'
 
 

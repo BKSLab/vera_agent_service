@@ -2,13 +2,79 @@
 Redis; доступность MCP Tools Server не является жёстким startup-условием.
 """
 
+import asyncio
+
 import httpx
 import pytest
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.api.v1.endpoints import health as health_module
+from app.clients.http_client import external_api_http_client
 from app.core.settings import get_settings
 from app.main import app, lifespan, session_bus
 
 pytestmark = pytest.mark.integration
+
+
+class _HangingConnection:
+    async def __aenter__(self):
+        await asyncio.Event().wait()
+
+    async def __aexit__(self, *_args):
+        return None
+
+
+async def test_lifespan_closes_http_client_and_health_checks_have_deadlines(monkeypatch):
+    test_app = FastAPI()
+
+    async def healthy_mcp(*_args, **_kwargs):
+        return []
+
+    async def hanging_redis_ping(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    assert external_api_http_client.is_closed is False
+    async with lifespan(test_app):
+        assert external_api_http_client.is_closed is False
+        transport = httpx.ASGITransport(app=test_app)
+        async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    health_module,
+                    'HARD_DEPENDENCY_HEALTH_CHECK_TIMEOUT_SECONDS',
+                    0.05,
+                )
+                patch.setattr(health_module, 'get_tools_with_retry', healthy_mcp)
+                patch.setattr(health_module.Redis, 'ping', hanging_redis_ping)
+                started_at = asyncio.get_running_loop().time()
+                redis_response = await client.get('/health')
+                redis_elapsed = asyncio.get_running_loop().time() - started_at
+
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    health_module,
+                    'HARD_DEPENDENCY_HEALTH_CHECK_TIMEOUT_SECONDS',
+                    0.05,
+                )
+                patch.setattr(health_module, 'get_tools_with_retry', healthy_mcp)
+                patch.setattr(
+                    AsyncEngine,
+                    'connect',
+                    lambda _engine: _HangingConnection(),
+                )
+                started_at = asyncio.get_running_loop().time()
+                database_response = await client.get('/health')
+                database_elapsed = asyncio.get_running_loop().time() - started_at
+
+        assert redis_response.status_code == 503
+        assert redis_response.json()['redis'] == 'unavailable'
+        assert redis_elapsed < 0.5
+        assert database_response.status_code == 503
+        assert database_response.json()['database'] == 'unavailable'
+        assert database_elapsed < 0.5
+
+    assert external_api_http_client.is_closed is True
 
 
 async def test_app_starts_and_health_reports_hard_dependencies_ok():

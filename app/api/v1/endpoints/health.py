@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from fastapi import APIRouter
@@ -18,6 +19,10 @@ MCP_HEALTH_CHECK_TIMEOUT_SECONDS: float = 2.0
 """Короткий таймаут для health-проверки MCP — не должен замедлять ответ
 `/health`, даже если MCP Tools Server недоступен (раздел 0.1 плана: MCP —
 мягкая зависимость, не входит в жёсткий startup-чек)."""
+
+HARD_DEPENDENCY_HEALTH_CHECK_TIMEOUT_SECONDS: float = 1.0
+"""Собственный deadline проверки Redis/PostgreSQL, независимый от
+драйверных connect/read timeout."""
 
 
 class HealthStatus(BaseModel):
@@ -47,15 +52,17 @@ def create_health_router(
         rabbitmq_ok = consumer.is_connected
 
         try:
-            await redis_health_client.ping()
+            async with asyncio.timeout(HARD_DEPENDENCY_HEALTH_CHECK_TIMEOUT_SECONDS):
+                await redis_health_client.ping()
             redis_ok = True
         except Exception as error:  # noqa: BLE001 - любая ошибка Redis = недоступен
             logger.warning('⚠️ Redis health-check неуспешен: %s', error)
             redis_ok = False
 
         try:
-            async with db_engine.connect() as connection:
-                await connection.execute(text('SELECT 1'))
+            async with asyncio.timeout(HARD_DEPENDENCY_HEALTH_CHECK_TIMEOUT_SECONDS):
+                async with db_engine.connect() as connection:
+                    await connection.execute(text('SELECT 1'))
             database_ok = True
         except Exception as error:  # noqa: BLE001 - любая ошибка PostgreSQL = недоступен
             logger.warning('⚠️ PostgreSQL health-check неуспешен: %s', error)

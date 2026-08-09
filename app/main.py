@@ -52,6 +52,8 @@ async def lifespan(app: FastAPI):
 
     try:
         async with AsyncExitStack() as stack:
+            stack.push_async_callback(external_api_http_client.aclose)
+
             logger.info('🚀 Проверка подключения к PostgreSQL...')
             async with engine.connect() as connection:
                 await connection.execute(text('SELECT 1'))
