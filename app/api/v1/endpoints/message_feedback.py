@@ -46,7 +46,7 @@ async def upsert_message_feedback(
     service: MessageFeedbackServiceDep,
     user_id: Annotated[
         str | None,
-        Header(alias='X-Vera-User-ID', max_length=100),
+        Header(alias='X-Vera-User-ID', max_length=255),
     ] = None,
     anonymous_token_hash: Annotated[
         str | None,

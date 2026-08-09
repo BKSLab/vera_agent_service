@@ -38,7 +38,7 @@ class ChatSession(Base):
         comment='Идентификатор сессии, поступивший от сайта.',
     )
     user_id: Mapped[str | None] = mapped_column(
-        String(length=100),
+        String(length=255),
         nullable=True,
         index=True,
         doc='Идентификатор авторизованного пользователя.',

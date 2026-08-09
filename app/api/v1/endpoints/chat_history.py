@@ -48,7 +48,7 @@ async def get_current_chat_session(
     service: ChatHistoryServiceDep,
     user_id: Annotated[
         str,
-        Header(alias='X-Vera-User-ID', min_length=1, max_length=100),
+        Header(alias='X-Vera-User-ID', min_length=1, max_length=255),
     ],
 ) -> CurrentChatSessionResponse:
     """Возвращает сессию, которую нужно открыть пользователю."""
@@ -103,7 +103,7 @@ async def get_chat_history(
     service: ChatHistoryServiceDep,
     user_id: Annotated[
         str | None,
-        Header(alias='X-Vera-User-ID', max_length=100),
+        Header(alias='X-Vera-User-ID', max_length=255),
     ] = None,
     anonymous_token_hash: Annotated[
         str | None,

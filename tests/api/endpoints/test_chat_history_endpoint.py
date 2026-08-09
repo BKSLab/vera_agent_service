@@ -70,6 +70,35 @@ async def test_current_chat_session_endpoint_returns_null_for_new_user():
     assert response.json() == {'session_id': None}
 
 
+@pytest.mark.parametrize(
+    ('user_id_length', 'expected_status'),
+    [(255, 200), (256, 422)],
+)
+@pytest.mark.asyncio
+async def test_current_chat_session_endpoint_validates_user_id_length(
+    user_id_length: int,
+    expected_status: int,
+):
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_current_session.return_value = None
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/current',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'u' * user_id_length,
+            },
+        )
+
+    assert response.status_code == expected_status
+
+
 @pytest.mark.asyncio
 async def test_chat_history_endpoint_returns_turn_contract():
     now = datetime.now(UTC)
@@ -156,6 +185,38 @@ async def test_chat_history_endpoint_returns_empty_unknown_session():
         'turns': [],
         'next_before_sequence': None,
     }
+
+
+@pytest.mark.parametrize(
+    ('user_id_length', 'expected_status'),
+    [(255, 200), (256, 422)],
+)
+@pytest.mark.asyncio
+async def test_chat_history_endpoint_validates_user_id_length(
+    user_id_length: int,
+    expected_status: int,
+):
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_history.return_value = ChatHistoryPage(
+        turns=[],
+        next_before_sequence=None,
+    )
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/session-1/history',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'u' * user_id_length,
+            },
+        )
+
+    assert response.status_code == expected_status
 
 
 @pytest.mark.asyncio

@@ -47,7 +47,7 @@ async def create_session_feedback(
     service: SessionFeedbackServiceDep,
     user_id: Annotated[
         str | None,
-        Header(alias='X-Vera-User-ID', max_length=100),
+        Header(alias='X-Vera-User-ID', max_length=255),
     ] = None,
     anonymous_token_hash: Annotated[
         str | None,

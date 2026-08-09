@@ -74,7 +74,7 @@ class ChatTurn(Base):
         comment='Порядковый номер вопроса и ответа внутри сессии.',
     )
     user_id: Mapped[str | None] = mapped_column(
-        String(length=100),
+        String(length=255),
         nullable=True,
         doc='Идентификатор пользователя.',
         comment='Идентификатор пользователя сайта, если он был авторизован.',
