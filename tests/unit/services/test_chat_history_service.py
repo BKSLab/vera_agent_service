@@ -5,7 +5,10 @@ import pytest
 
 from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import ChatTurn
-from app.exceptions.chat_session import ChatSessionAccessDeniedError
+from app.exceptions.chat_session import (
+    ChatSessionAccessDeniedError,
+    ChatSessionNotFoundError,
+)
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
 from app.services.chat_history import ChatHistoryService
@@ -73,21 +76,22 @@ async def test_chat_history_service_returns_session_turns():
 
 
 @pytest.mark.asyncio
-async def test_get_history_returns_empty_page_for_unknown_session():
+async def test_get_history_rejects_unknown_session():
     session_repository = AsyncMock(spec=ChatSessionRepository)
     turn_repository = AsyncMock(spec=ChatTurnRepository)
     session_repository.get_by_session_id.return_value = None
     service = ChatHistoryService(session_repository, turn_repository)
 
-    result = await service.get_history(
-        'missing-session',
-        user_id=None,
-        anonymous_token_hash='a' * 64,
-        limit=30,
-        before_sequence=None,
-    )
+    with pytest.raises(ChatSessionNotFoundError) as exc_info:
+        await service.get_history(
+            'missing-session',
+            user_id=None,
+            anonymous_token_hash='a' * 64,
+            limit=30,
+            before_sequence=None,
+        )
 
-    assert result.turns == []
+    assert exc_info.value.session_id == 'missing-session'
     turn_repository.list_by_chat_session_id.assert_not_awaited()
 
 

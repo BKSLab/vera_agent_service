@@ -8,7 +8,10 @@ import pytest
 from app.core.rate_limit import limiter
 from app.core.settings import get_settings
 from app.dependencies.services import get_chat_history_service
-from app.exceptions.chat_session import ChatSessionAccessDeniedError
+from app.exceptions.chat_session import (
+    ChatSessionAccessDeniedError,
+    ChatSessionNotFoundError,
+)
 from app.main import app
 from app.services.chat_history import ChatHistoryPage, ChatHistoryService
 
@@ -159,12 +162,9 @@ async def test_chat_history_endpoint_returns_turn_contract():
 
 
 @pytest.mark.asyncio
-async def test_chat_history_endpoint_returns_empty_unknown_session():
+async def test_chat_history_endpoint_returns_404_for_unknown_session():
     service = AsyncMock(spec=ChatHistoryService)
-    service.get_history.return_value = ChatHistoryPage(
-        turns=[],
-        next_before_sequence=None,
-    )
+    service.get_history.side_effect = ChatSessionNotFoundError('missing-session')
     app.dependency_overrides[get_chat_history_service] = lambda: service
     transport = httpx.ASGITransport(app=app)
 
@@ -179,12 +179,8 @@ async def test_chat_history_endpoint_returns_empty_unknown_session():
             },
         )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        'session_id': 'missing-session',
-        'turns': [],
-        'next_before_sequence': None,
-    }
+    assert response.status_code == 404
+    assert response.json() == {'detail': 'Сессия missing-session не найдена.'}
 
 
 @pytest.mark.parametrize(

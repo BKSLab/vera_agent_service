@@ -8,6 +8,7 @@ from app.dependencies.auth import VerifyApiKeyDep
 from app.dependencies.services import ChatHistoryServiceDep
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
+    ChatSessionNotFoundError,
     ChatSessionServiceError,
 )
 from app.schemas.chat_history import (
@@ -84,6 +85,7 @@ async def get_current_chat_session(
     responses={
         401: {'description': 'Невалидный сервисный API-ключ.'},
         403: {'description': 'Сессия принадлежит другому владельцу.'},
+        404: {'description': 'Сессия не найдена.'},
         422: {'description': 'Ошибка валидации session_id.'},
         429: {'description': 'Превышен лимит запросов.'},
         500: {'description': 'Ошибка чтения истории.'},
@@ -150,6 +152,7 @@ async def get_chat_history(
         )
     except (
         ChatSessionAccessDeniedError,
+        ChatSessionNotFoundError,
         ChatSessionServiceError,
     ) as error:
         logger.exception(

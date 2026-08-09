@@ -4,6 +4,7 @@ from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import ChatTurn
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
+    ChatSessionNotFoundError,
     ChatSessionRepositoryError,
     ChatSessionServiceError,
 )
@@ -54,7 +55,7 @@ class ChatHistoryService:
                 session_id
             )
             if chat_session is None:
-                return ChatHistoryPage(turns=[], next_before_sequence=None)
+                raise ChatSessionNotFoundError(session_id)
 
             ensure_chat_session_access(
                 chat_session,
@@ -72,7 +73,7 @@ class ChatHistoryService:
                     turns[0].sequence_number if has_more and turns else None
                 ),
             )
-        except ChatSessionAccessDeniedError:
+        except (ChatSessionAccessDeniedError, ChatSessionNotFoundError):
             raise
         except (ChatSessionRepositoryError, ChatTurnRepositoryError) as error:
             raise ChatSessionServiceError from error
