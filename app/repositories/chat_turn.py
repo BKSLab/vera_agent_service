@@ -1,14 +1,19 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, literal, literal_column, select
+from sqlalchemy import func, literal, literal_column, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models.chat_session import ChatSession
-from app.db.models.chat_turn import ChatTurn
+from app.db.models.chat_turn import (
+    STATUS_COMPLETED,
+    STATUS_DELIVERY_UNCONFIRMED,
+    STATUS_PROCESSING,
+    ChatTurn,
+)
 from app.db.models.message_feedback import MessageFeedback
 from app.db.models.session_feedback import SessionFeedback
 from app.exceptions.chat_turn import ChatTurnAlreadyExistsError, ChatTurnRepositoryError
@@ -156,6 +161,72 @@ class ChatTurnRepository:
             await self.db_session.rollback()
             raise ChatTurnRepositoryError(str(error)) from error
 
+    async def claim_expired_lease(
+        self,
+        request_id: str,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> bool:
+        """Атомарно перезахватывает реплику с истёкшей арендой.
+
+        Одним `UPDATE ... WHERE` — проверка и захват не должны разъезжаться:
+        два обработчика одного `request_id` иначе оба решат, что аренда
+        свободна. Возвращает True, если аренда досталась этому worker.
+        """
+        try:
+            now = datetime.now(UTC)
+            result = await self.db_session.execute(
+                update(ChatTurn)
+                .where(
+                    ChatTurn.request_id == request_id,
+                    ChatTurn.status == STATUS_PROCESSING,
+                    ChatTurn.lease_until.is_not(None),
+                    ChatTurn.lease_until < now,
+                )
+                .values(
+                    lease_until=now + timedelta(seconds=lease_seconds),
+                    worker_id=worker_id,
+                    attempt_count=ChatTurn.attempt_count + 1,
+                    started_at=now,
+                )
+            )
+            await self.db_session.commit()
+            return result.rowcount == 1
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatTurnRepositoryError(str(error)) from error
+
+    async def reconcile_stale(self, stale_before: datetime, detail: str) -> int:
+        """Переводит брошенные `processing` в неопределённый исход.
+
+        Реплика остаётся `processing` навсегда, если процесс упал, а RabbitMQ
+        не переприслал сообщение (например оно было подтверждено раньше сбоя).
+        `stale_before` задаётся с запасом относительно аренды, чтобы не
+        обогнать штатную повторную доставку сразу после рестарта.
+        """
+        try:
+            result = await self.db_session.execute(
+                update(ChatTurn)
+                .where(
+                    ChatTurn.status == STATUS_PROCESSING,
+                    ChatTurn.lease_until.is_not(None),
+                    ChatTurn.lease_until < stale_before,
+                )
+                .values(
+                    status=STATUS_DELIVERY_UNCONFIRMED,
+                    safe_error='StaleLeaseReclaimed',
+                    terminal_detail=detail,
+                    completed_at=datetime.now(UTC),
+                    lease_until=None,
+                    worker_id=None,
+                )
+            )
+            await self.db_session.commit()
+            return result.rowcount
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatTurnRepositoryError(str(error)) from error
+
     async def complete(
         self,
         chat_turn: ChatTurn,
@@ -164,15 +235,18 @@ class ChatTurnRepository:
         technical_metadata: dict,
         latency_ms: int,
     ) -> ChatTurn:
-        """Помечает реплику успешно завершённой."""
+        """Помечает реплику успешно завершённой и снимает аренду."""
         try:
             chat_turn.answer = answer
             chat_turn.sources = sources
             chat_turn.technical_metadata = technical_metadata
-            chat_turn.status = 'completed'
+            chat_turn.status = STATUS_COMPLETED
             chat_turn.safe_error = None
+            chat_turn.terminal_detail = None
             chat_turn.completed_at = datetime.now(UTC)
             chat_turn.latency_ms = latency_ms
+            chat_turn.lease_until = None
+            chat_turn.worker_id = None
             await self.db_session.commit()
             return chat_turn
         except SQLAlchemyError as error:
@@ -186,14 +260,23 @@ class ChatTurnRepository:
         safe_error: str,
         answer: str | None,
         latency_ms: int,
+        terminal_detail: str | None = None,
     ) -> ChatTurn:
-        """Сохраняет ошибку обработки реплики."""
+        """Сохраняет терминальный неуспех и снимает аренду.
+
+        `terminal_detail` — ровно тот текст, который ушёл пользователю в
+        SSE-событии: повторная доставка обязана воспроизвести его дословно,
+        а не собирать заново по статусу.
+        """
         try:
             chat_turn.status = status
             chat_turn.safe_error = safe_error
             chat_turn.answer = answer
+            chat_turn.terminal_detail = terminal_detail
             chat_turn.completed_at = datetime.now(UTC)
             chat_turn.latency_ms = latency_ms
+            chat_turn.lease_until = None
+            chat_turn.worker_id = None
             await self.db_session.commit()
             return chat_turn
         except SQLAlchemyError as error:

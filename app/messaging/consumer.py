@@ -5,6 +5,8 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
+from os import getpid
+from socket import gethostname
 
 import aio_pika
 from langchain_core.messages import HumanMessage
@@ -13,6 +15,12 @@ from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttribu
 from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import ValidationError
 
+from app.db.models.chat_turn import (
+    STATUS_COMPLETED,
+    STATUS_DELIVERY_UNCONFIRMED,
+    STATUS_GENERATION_FAILED,
+    STATUS_STREAM_INTERRUPTED,
+)
 from app.exceptions.chat_session import ChatSessionAccessDeniedError
 from app.exceptions.chat_turn import (
     ChatPersistenceServiceError,
@@ -26,7 +34,12 @@ from app.observability.request_trace import (
     set_request_trace,
 )
 from app.observability.tracing import get_tracer
-from app.services.chat_persistence import ChatPersistenceService, TurnStartResult
+from app.services.chat_persistence import (
+    START_DUPLICATE_IN_PROGRESS,
+    START_DUPLICATE_TERMINAL,
+    ChatPersistenceService,
+    TurnStartResult,
+)
 
 logger = logging.getLogger('vera_agent_service')
 
@@ -34,6 +47,32 @@ DEFAULT_RETRIES: int = 3
 DEFAULT_RETRY_DELAY: float = 1.0
 DEFAULT_MAX_RETRY_DELAY: float = 30.0
 JITTER_RATIO: float = 0.1
+
+DEFAULT_PERSISTENCE_RETRIES: int = 3
+"""Повторы только для сохранения результата: они не переигрывают граф и
+поэтому безопасны даже после мутирующего инструмента."""
+
+DEFAULT_LEASE_SECONDS: float = 900.0
+"""Срок аренды реплики. Должен с запасом превышать самый долгий инструмент
+(отправка консультации — до 360 секунд), иначе живую обработку перехватит
+повторная доставка того же `request_id`."""
+
+GENERATION_FAILED_MESSAGE = 'Сервис временно недоступен, попробуйте позже.'
+PERSISTENCE_UNAVAILABLE_MESSAGE = 'Сервис временно недоступен, попробуйте позже.'
+STREAM_INTERRUPTED_MESSAGE = 'Произошла ошибка при формировании ответа.'
+DUPLICATE_IN_PROGRESS_MESSAGE = 'Этот запрос уже обрабатывается.'
+COMMIT_FAILED_MESSAGE = (
+    'Ответ подготовлен, но его не удалось сохранить. '
+    'Проверьте историю диалога позже.'
+)
+SHUTDOWN_MESSAGE = (
+    'Обработка прервана перезапуском сервиса. Попробуйте повторить запрос.'
+)
+STALE_TURN_MESSAGE = (
+    'Обработка запроса была прервана. Попробуйте повторить вопрос.'
+)
+"""Текст для реплик, брошенных упавшим процессом и закрытых при старте."""
+
 MUTATING_TOOL_UNCONFIRMED_MESSAGE = (
     'Не удалось подтвердить результат отправки консультации. '
     'Проверьте почту перед новой попыткой.'
@@ -58,6 +97,74 @@ PersistenceServiceFactory = Callable[
     [],
     AbstractAsyncContextManager[ChatPersistenceService],
 ]
+
+
+class EmptyLlmStreamError(RuntimeError):
+    """Модель не отдала ни одного токена.
+
+    Отсутствие содержимого — ошибка ответа, а не успех: сохранённый пустой
+    `completed` и отправленный `done` выглядели бы для пользователя как
+    полученная консультация (VERA-018).
+    """
+
+    def __init__(self) -> None:
+        super().__init__('LLM не вернула ни одного токена ответа')
+
+
+@dataclass
+class _Delivery:
+    """Гарантирует инварианты одной доставки RabbitMQ.
+
+    Ровно один `ack`/`nack` и ровно одно терминальное SSE-событие на запрос:
+    обе гарантии раньше держались на дисциплине каждой ветки кода, из-за чего
+    неожиданное исключение оставляло delivery неподтверждённой, а клиента —
+    без завершения потока (VERA-015).
+    """
+
+    message: aio_pika.abc.AbstractIncomingMessage
+    token_sink: TokenSink
+    request_id: str | None = None
+    partial_answer: str | None = None
+    _terminal_sent: bool = False
+    _settled: bool = False
+    _started_at: float = field(default_factory=time.monotonic)
+
+    def bind(self, request_id: str) -> None:
+        """Связывает доставку с адресуемым запросом."""
+        self.request_id = request_id
+
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self._started_at) * 1000)
+
+    async def send_terminal(self, event: dict) -> None:
+        """Отправляет терминальное событие, если оно ещё не отправлялось."""
+        if self._terminal_sent or self.request_id is None:
+            return
+        self._terminal_sent = True
+        await self.token_sink(self.request_id, event)
+
+    async def ack(self) -> None:
+        if self._settled:
+            return
+        self._settled = True
+        await self.message.ack()
+
+    async def nack(self) -> None:
+        """Отклоняет доставку без повторной постановки — в DLQ."""
+        if self._settled:
+            return
+        self._settled = True
+        await self.message.nack(requeue=False)
+
+    async def settle_if_pending(self) -> None:
+        """Страховка инварианта: неподтверждённых доставок не остаётся."""
+        if self._settled:
+            return
+        logger.error(
+            '❌ Доставка запроса %s осталась неподтверждённой — отправляем в DLQ',
+            self.request_id,
+        )
+        await self.nack()
 
 
 @dataclass
@@ -116,6 +223,9 @@ class AgentRequestConsumer:
         persistence_service_factory: PersistenceServiceFactory | None = None,
         retries: int = DEFAULT_RETRIES,
         prefetch_count: int = 1,
+        persistence_retries: int = DEFAULT_PERSISTENCE_RETRIES,
+        lease_seconds: float = DEFAULT_LEASE_SECONDS,
+        worker_id: str | None = None,
     ):
         self._connection_url = connection_url
         self._queue_name = queue_name
@@ -125,6 +235,9 @@ class AgentRequestConsumer:
         self._persistence_service_factory = persistence_service_factory
         self._retries = retries
         self._prefetch_count = prefetch_count
+        self._persistence_retries = persistence_retries
+        self._lease_seconds = lease_seconds
+        self._worker_id = worker_id or f'{gethostname()}:{getpid()}'
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
         self._queue: aio_pika.abc.AbstractQueue | None = None
@@ -167,6 +280,7 @@ class AgentRequestConsumer:
         """Один root span охватывает обработку delivery до терминального SSE и ack/nack."""
         trace_data = AgentRequestTraceData()
         context_token = set_request_trace(trace_data)
+        delivery = _Delivery(message=message, token_sink=self._token_sink)
         try:
             with get_tracer().start_as_current_span(
                 'vera.agent.request',
@@ -177,31 +291,76 @@ class AgentRequestConsumer:
                 },
             ) as span:
                 try:
-                    await self._handle_message_body(message, span, trace_data)
+                    await self._handle_message_body(delivery, span, trace_data)
+                except asyncio.CancelledError as error:
+                    # Остановка сервиса во время обработки. Исход запроса
+                    # действительно неизвестен, поэтому он и записывается как
+                    # неопределённый, а не как ошибка генерации. Отмену не
+                    # проглатываем — она должна дойти до задачи consumer.
+                    trace_data.outcome = 'cancelled'
+                    _mark_span_error(span, error)
+                    await self._settle_shutdown(delivery)
+                    raise
                 except Exception as error:
+                    # Сюда попадает только то, что не предусмотрено ветками
+                    # ниже. Клиент всё равно обязан получить терминальное
+                    # событие, а delivery — ровно одно подтверждение.
                     trace_data.outcome = 'error'
                     _mark_span_error(span, error)
-                    raise
+                    logger.exception(
+                        '❌ Непредвиденная ошибка обработки delivery очереди %s',
+                        self._queue_name,
+                    )
+                    await delivery.send_terminal(
+                        {'type': 'error', 'detail': GENERATION_FAILED_MESSAGE}
+                    )
+                    await delivery.nack()
                 finally:
                     self._finalize_root_span(span, trace_data)
         finally:
             reset_request_trace(context_token)
+            # Последняя страховка инварианта «ровно один ack/nack»: ни один
+            # путь не имеет права оставить delivery неподтверждённым — при
+            # prefetch_count=1 это остановило бы весь чат до разрыва
+            # соединения с брокером.
+            await delivery.settle_if_pending()
+
+    async def _settle_shutdown(self, delivery: '_Delivery') -> None:
+        """Фиксирует неопределённый исход при остановке сервиса."""
+        if delivery.request_id is None:
+            await delivery.nack()
+            return
+        await delivery.send_terminal({'type': 'error', 'detail': SHUTDOWN_MESSAGE})
+        await self._fail_persistence(
+            request_id=delivery.request_id,
+            status=STATUS_DELIVERY_UNCONFIRMED,
+            safe_error='ServiceShutdown',
+            answer=delivery.partial_answer,
+            latency_ms=delivery.elapsed_ms(),
+            terminal_detail=SHUTDOWN_MESSAGE,
+        )
+        await delivery.nack()
 
     async def _handle_message_body(
         self,
-        message: aio_pika.abc.AbstractIncomingMessage,
+        delivery: '_Delivery',
         span: Span,
         trace_data: AgentRequestTraceData,
     ) -> None:
         try:
-            payload = _parse_payload(message.body)
+            payload = _parse_payload(delivery.message.body)
         except InvalidAgentRequestError as error:
+            # Терминальное SSE намеренно не отправляется: `request_id` из
+            # невалидного сообщения не подтверждён ничем, и отправка по нему
+            # позволила бы завершить чужой поток (VERA-016).
             logger.error('❌ Невалидный payload %s: %s', self._queue_name, error)
             trace_data.outcome = 'invalid_payload'
             _mark_span_error(span, error)
-            await message.nack(requeue=False)
+            await delivery.nack()
             return
 
+        delivery.bind(payload.request_id)
+        trace_data.request_id = payload.request_id
         span.set_attribute('session.id', payload.session_id)
         span.set_attribute('request.id', payload.request_id)
         span.set_attribute('user.authenticated', payload.user_id is not None)
@@ -213,69 +372,102 @@ class AgentRequestConsumer:
             payload.message,
         )
 
-        processing_started_at = time.monotonic()
         try:
-            persistence_start = await self._start_persistence(payload)
+            persistence_start = await self._start_persistence_with_retry(payload)
         except (
             ChatSessionAccessDeniedError,
             ChatTurnSessionMismatchError,
         ) as error:
             logger.error(
-                '❌ Запрос не относится к доступной сессии. '
-                'session_id=%s, request_id=%s.',
+                '❌ Запрос не относится к доступной сессии. session_id=%s, request_id=%s.',
                 payload.session_id,
                 payload.request_id,
             )
-            await self._token_sink(payload.request_id, {'type': 'error', 'detail': error.detail})
-            await message.nack(requeue=False)
+            await delivery.send_terminal({'type': 'error', 'detail': error.detail})
+            await delivery.nack()
             trace_data.outcome = 'invalid_payload'
             _mark_span_error(span, error)
             return
         except ChatPersistenceServiceError as error:
             logger.error(
-                '❌ Не удалось зарегистрировать реплику в PostgreSQL. '
+                '❌ Не удалось зарегистрировать реплику в PostgreSQL после %d попыток. '
                 'session_id=%s, request_id=%s.',
+                self._persistence_retries,
                 payload.session_id,
                 payload.request_id,
             )
-            await self._token_sink(
-                payload.request_id,
-                {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'},
+            await delivery.send_terminal(
+                {'type': 'error', 'detail': PERSISTENCE_UNAVAILABLE_MESSAGE}
             )
-            await message.nack(requeue=False)
+            await delivery.nack()
             trace_data.outcome = 'persistence_error'
             _mark_span_error(span, error)
             return
 
-        if persistence_start is not None and not persistence_start.created:
-            if persistence_start.status in {'completed', 'delivery_unconfirmed'}:
-                if persistence_start.answer:
-                    await self._token_sink(
-                        payload.request_id,
-                        {'type': 'token', 'content': persistence_start.answer},
-                    )
-                await self._token_sink(payload.request_id, {'type': 'done'})
-                await message.ack()
-                trace_data.outcome = 'done'
-                trace_data.streaming_started = bool(persistence_start.answer)
-                trace_data.response_chunk_count = 1 if persistence_start.answer else 0
-                trace_data.response_char_count = len(persistence_start.answer or '')
-                self._set_content(
-                    span,
-                    SpanAttributes.OUTPUT_VALUE,
-                    SpanAttributes.OUTPUT_MIME_TYPE,
-                    persistence_start.answer or '',
+        if persistence_start is not None:
+            if persistence_start.outcome == START_DUPLICATE_TERMINAL:
+                await self._replay_terminal_outcome(
+                    delivery, persistence_start, span, trace_data
                 )
                 return
-            if persistence_start.status == 'processing':
-                await self._token_sink(
-                    payload.request_id,
-                    {'type': 'error', 'detail': 'Этот запрос уже обрабатывается.'},
+            if persistence_start.outcome == START_DUPLICATE_IN_PROGRESS:
+                await delivery.send_terminal(
+                    {'type': 'error', 'detail': DUPLICATE_IN_PROGRESS_MESSAGE}
                 )
-                await message.ack()
+                await delivery.ack()
                 trace_data.outcome = 'duplicate_processing'
                 return
 
+        await self._process_claimed_turn(delivery, payload, span, trace_data)
+
+    async def _replay_terminal_outcome(
+        self,
+        delivery: '_Delivery',
+        persistence_start: TurnStartResult,
+        span: Span,
+        trace_data: AgentRequestTraceData,
+    ) -> None:
+        """Повторяет сохранённый исход, а не выдаёт любой ответ за успех.
+
+        Прежняя реализация воспроизводила сохранённый текст как `token` + `done`
+        и для `delivery_unconfirmed`, превращая зафиксированную ошибку в успех
+        (VERA-034). Успехом считается только `completed`.
+        """
+        if persistence_start.status == STATUS_COMPLETED:
+            answer = persistence_start.answer or ''
+            if answer:
+                await self._token_sink(
+                    delivery.request_id, {'type': 'token', 'content': answer}
+                )
+            await delivery.send_terminal({'type': 'done'})
+            trace_data.outcome = 'done'
+            trace_data.streaming_started = bool(answer)
+            trace_data.response_chunk_count = 1 if answer else 0
+            trace_data.response_char_count = len(answer)
+            self._set_content(
+                span,
+                SpanAttributes.OUTPUT_VALUE,
+                SpanAttributes.OUTPUT_MIME_TYPE,
+                answer,
+            )
+        else:
+            await delivery.send_terminal(
+                {
+                    'type': 'error',
+                    'detail': persistence_start.terminal_detail or GENERATION_FAILED_MESSAGE,
+                }
+            )
+            trace_data.outcome = 'error'
+        await delivery.ack()
+
+    async def _process_claimed_turn(
+        self,
+        delivery: '_Delivery',
+        payload: AgentRequestMessage,
+        span: Span,
+        trace_data: AgentRequestTraceData,
+    ) -> None:
+        """Выполняет граф и приводит delivery к ровно одному исходу."""
         last_error: Exception | None = None
         for attempt in range(1, self._retries + 1):
             streaming_started = False
@@ -291,18 +483,44 @@ class AgentRequestConsumer:
                     streaming_started = True
                     trace_data.streaming_started = True
                     response_chunks.append(content)
+                    delivery.partial_answer = ''.join(response_chunks)
                     trace_data.response_chunk_count += 1
                     trace_data.response_char_count += len(content)
                 answer = ''.join(response_chunks)
-                await self._complete_persistence(
+                if not answer:
+                    # Пустой поток — это отсутствие ответа, а не успех
+                    # (VERA-018). До первого токена повтор безопасен.
+                    raise EmptyLlmStreamError
+
+                committed = await self._complete_persistence(
                     request_id=payload.request_id,
                     answer=answer,
                     persistence_data=persistence_data,
                     trace_data=trace_data,
-                    latency_ms=int((time.monotonic() - processing_started_at) * 1000),
+                    latency_ms=delivery.elapsed_ms(),
                 )
-                await self._token_sink(payload.request_id, {'type': 'done'})
-                await message.ack()
+                if not committed:
+                    # Токены уже у пользователя, но durable-записи нет.
+                    # `done` в этой ситуации соврал бы: история осталась бы
+                    # незавершённой, а оценка ответа была бы недоступна
+                    # (VERA-004).
+                    await delivery.send_terminal(
+                        {'type': 'error', 'detail': COMMIT_FAILED_MESSAGE}
+                    )
+                    await self._fail_persistence(
+                        request_id=payload.request_id,
+                        status=STATUS_DELIVERY_UNCONFIRMED,
+                        safe_error='CompletePersistenceFailed',
+                        answer=answer,
+                        latency_ms=delivery.elapsed_ms(),
+                        terminal_detail=COMMIT_FAILED_MESSAGE,
+                    )
+                    await delivery.ack()
+                    trace_data.outcome = 'error'
+                    return
+
+                await delivery.send_terminal({'type': 'done'})
+                await delivery.ack()
                 trace_data.outcome = (
                     'degraded'
                     if (
@@ -318,41 +536,31 @@ class AgentRequestConsumer:
                     answer,
                 )
                 return
+            except asyncio.CancelledError:
+                raise
             except Exception as error:  # noqa: BLE001 - сбой графа тоже должен попасть сюда
                 last_error = error
+                partial_answer = ''.join(response_chunks) or None
+
                 if trace_data.mutating_tool_called:
                     logger.error(
-                        '❌ Ошибка после начала мутирующего MCP-вызова; '
-                        'повтор графа запрещён '
+                        '❌ Ошибка после начала мутирующего MCP-вызова; повтор графа запрещён '
                         '(session_id=%s, request_id=%s): %s',
                         payload.session_id,
                         payload.request_id,
                         type(error).__name__,
                     )
-                    await self._token_sink(
-                        payload.request_id,
-                        {
-                            'type': 'error',
-                            'detail': MUTATING_TOOL_UNCONFIRMED_MESSAGE,
-                        },
+                    await self._finish_with_error(
+                        delivery=delivery,
+                        span=span,
+                        trace_data=trace_data,
+                        error=error,
+                        status=STATUS_DELIVERY_UNCONFIRMED,
+                        detail=MUTATING_TOOL_UNCONFIRMED_MESSAGE,
+                        answer=partial_answer,
                     )
-                    await self._fail_persistence(
-                        request_id=payload.request_id,
-                        status='delivery_unconfirmed',
-                        safe_error=type(error).__name__,
-                        answer=''.join(response_chunks) or None,
-                        latency_ms=int((time.monotonic() - processing_started_at) * 1000),
-                    )
-                    await message.ack()
-                    trace_data.outcome = 'error'
-                    self._set_content(
-                        span,
-                        SpanAttributes.OUTPUT_VALUE,
-                        SpanAttributes.OUTPUT_MIME_TYPE,
-                        ''.join(response_chunks),
-                    )
-                    _mark_span_error(span, error)
                     return
+
                 if streaming_started:
                     logger.error(
                         '❌ Ошибка после начала стриминга (session_id=%s, request_id=%s): %s',
@@ -360,27 +568,17 @@ class AgentRequestConsumer:
                         payload.request_id,
                         error,
                     )
-                    await self._token_sink(
-                        payload.request_id,
-                        {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'},
+                    await self._finish_with_error(
+                        delivery=delivery,
+                        span=span,
+                        trace_data=trace_data,
+                        error=error,
+                        status=STATUS_STREAM_INTERRUPTED,
+                        detail=STREAM_INTERRUPTED_MESSAGE,
+                        answer=partial_answer,
                     )
-                    await self._fail_persistence(
-                        request_id=payload.request_id,
-                        status='delivery_unconfirmed',
-                        safe_error=type(error).__name__,
-                        answer=''.join(response_chunks) or None,
-                        latency_ms=int((time.monotonic() - processing_started_at) * 1000),
-                    )
-                    await message.ack()
-                    trace_data.outcome = 'error'
-                    self._set_content(
-                        span,
-                        SpanAttributes.OUTPUT_VALUE,
-                        SpanAttributes.OUTPUT_MIME_TYPE,
-                        ''.join(response_chunks),
-                    )
-                    _mark_span_error(span, error)
                     return
+
                 span.add_event(
                     'agent.retry',
                     attributes={'retry.attempt': attempt, 'error.type': type(error).__name__},
@@ -405,20 +603,54 @@ class AgentRequestConsumer:
             payload.request_id,
             last_error,
         )
-        await self._token_sink(
-            payload.request_id, {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'}
-        )
-        await self._fail_persistence(
-            request_id=payload.request_id,
-            status='failed',
-            safe_error=type(last_error).__name__ if last_error is not None else 'UnknownError',
+        await self._finish_with_error(
+            delivery=delivery,
+            span=span,
+            trace_data=trace_data,
+            error=last_error,
+            status=STATUS_GENERATION_FAILED,
+            detail=GENERATION_FAILED_MESSAGE,
             answer=None,
-            latency_ms=int((time.monotonic() - processing_started_at) * 1000),
+            requeue_to_dlq=True,
         )
-        await message.nack(requeue=False)
-        trace_data.outcome = 'dlq'
-        if last_error is not None:
-            _mark_span_error(span, last_error)
+
+    async def _finish_with_error(
+        self,
+        delivery: '_Delivery',
+        span: Span,
+        trace_data: AgentRequestTraceData,
+        error: Exception | None,
+        status: str,
+        detail: str,
+        answer: str | None,
+        requeue_to_dlq: bool = False,
+    ) -> None:
+        """Единая точка терминального неуспеха: SSE, статус в БД и ack/nack."""
+        await delivery.send_terminal({'type': 'error', 'detail': detail})
+        await self._fail_persistence(
+            request_id=delivery.request_id,
+            status=status,
+            safe_error=type(error).__name__ if error is not None else 'UnknownError',
+            answer=answer,
+            latency_ms=delivery.elapsed_ms(),
+            terminal_detail=detail,
+        )
+        if requeue_to_dlq:
+            await delivery.nack()
+            trace_data.outcome = 'dlq'
+        else:
+            # Часть ответа уже у пользователя либо мутирующий инструмент уже
+            # начал работу — повторная обработка навредит сильнее потери.
+            await delivery.ack()
+            trace_data.outcome = 'error'
+        self._set_content(
+            span,
+            SpanAttributes.OUTPUT_VALUE,
+            SpanAttributes.OUTPUT_MIME_TYPE,
+            answer or '',
+        )
+        if error is not None:
+            _mark_span_error(span, error)
 
     @staticmethod
     def _set_content(
@@ -462,7 +694,7 @@ class AgentRequestConsumer:
         self,
         payload: AgentRequestMessage,
     ) -> TurnStartResult | None:
-        """Регистрирует реплику до запуска графа."""
+        """Регистрирует или перезахватывает реплику до запуска графа."""
         if self._persistence_service_factory is None:
             return None
         async with self._persistence_service_factory() as service:
@@ -472,7 +704,38 @@ class AgentRequestConsumer:
                 user_id=payload.user_id,
                 anonymous_token_hash=payload.anonymous_token_hash,
                 question=payload.message,
+                worker_id=self._worker_id,
+                lease_seconds=self._lease_seconds,
             )
+
+    async def _start_persistence_with_retry(
+        self,
+        payload: AgentRequestMessage,
+    ) -> TurnStartResult | None:
+        """Повторяет регистрацию при временном сбое БД.
+
+        Мгновенный уход в DLQ по первой же ошибке PostgreSQL терял запрос на
+        коротком недоступности базы (VERA-015). Граф здесь ещё не запускался,
+        поэтому повтор безопасен и ничего не дублирует. Ошибки владения не
+        ретраятся — они не временные.
+        """
+        last_error: ChatPersistenceServiceError | None = None
+        for attempt in range(1, self._persistence_retries + 1):
+            try:
+                return await self._start_persistence(payload)
+            except ChatPersistenceServiceError as error:
+                last_error = error
+                logger.warning(
+                    '⚠️ Не удалось зарегистрировать реплику '
+                    '(попытка %d/%d, request_id=%s): %s',
+                    attempt,
+                    self._persistence_retries,
+                    payload.request_id,
+                    type(error).__name__,
+                )
+                if attempt < self._persistence_retries:
+                    await asyncio.sleep(_get_backoff_delay(attempt))
+        raise last_error if last_error is not None else ChatPersistenceServiceError
 
     async def _complete_persistence(
         self,
@@ -481,29 +744,48 @@ class AgentRequestConsumer:
         persistence_data: TurnPersistenceData,
         trace_data: AgentRequestTraceData,
         latency_ms: int,
-    ) -> None:
-        """Сохраняет завершённый ответ; не влияет на формирование ответа."""
+    ) -> bool:
+        """Durable-сохраняет завершённый ответ.
+
+        Возвращает признак успеха: `done` разрешено отправлять только после
+        подтверждённого commit, иначе живой UI покажет успешный ответ, а
+        история навсегда останется в `processing` (VERA-004). Повтор здесь
+        сохраняет уже сформированный ответ и графа не переигрывает.
+        """
         if self._persistence_service_factory is None:
-            return
+            return True
         technical_metadata = {
             'route': trace_data.route,
             'tool_calls': persistence_data.tool_calls,
             'search_unavailable': trace_data.search_unavailable,
         }
-        try:
-            async with self._persistence_service_factory() as service:
-                await service.complete_turn(
-                    request_id=request_id,
-                    answer=answer,
-                    sources=persistence_data.sources,
-                    technical_metadata=technical_metadata,
-                    latency_ms=latency_ms,
+        for attempt in range(1, self._persistence_retries + 1):
+            try:
+                async with self._persistence_service_factory() as service:
+                    await service.complete_turn(
+                        request_id=request_id,
+                        answer=answer,
+                        sources=persistence_data.sources,
+                        technical_metadata=technical_metadata,
+                        latency_ms=latency_ms,
+                    )
+                return True
+            except ChatPersistenceServiceError:
+                logger.warning(
+                    '⚠️ Ответ сформирован, но не сохранён '
+                    '(попытка %d/%d, request_id=%s)',
+                    attempt,
+                    self._persistence_retries,
+                    request_id,
                 )
-        except ChatPersistenceServiceError:
-            logger.exception(
-                '❌ Ответ сформирован, но не сохранён в PostgreSQL. request_id=%s.',
-                request_id,
-            )
+                if attempt < self._persistence_retries:
+                    await asyncio.sleep(_get_backoff_delay(attempt))
+        logger.error(
+            '❌ Ответ сформирован, но не сохранён в PostgreSQL после %d попыток. request_id=%s.',
+            self._persistence_retries,
+            request_id,
+        )
+        return False
 
     async def _fail_persistence(
         self,
@@ -512,6 +794,7 @@ class AgentRequestConsumer:
         safe_error: str,
         answer: str | None,
         latency_ms: int,
+        terminal_detail: str | None = None,
     ) -> None:
         """Сохраняет ошибочный статус, не меняя текущую RabbitMQ/SSE-ветку."""
         if self._persistence_service_factory is None:
@@ -524,6 +807,7 @@ class AgentRequestConsumer:
                     safe_error=safe_error,
                     answer=answer,
                     latency_ms=latency_ms,
+                    terminal_detail=terminal_detail,
                 )
         except ChatPersistenceServiceError:
             logger.exception(

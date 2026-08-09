@@ -33,13 +33,26 @@ SEND_CONSULTATION_EMAIL_TOOL_NAME = 'send_consultation_email'
 """Мутирующий инструмент формирования PDF и отправки консультации."""
 
 
+IDEMPOTENCY_KEY_HEADER = 'X-Idempotency-Key'
+"""Ключ, по которому MCP Tools Server может отбросить повторную отправку.
+
+Значение — `request_id` реплики: после перезахвата брошенной аренды граф
+выполняется заново, и без ключа консультация ушла бы пользователю второй
+раз (VERA-014). Дедупликация на стороне инструмента — обязанность
+`vera_mcp_service`; здесь гарантируется только стабильность ключа.
+"""
+
+
 async def inject_trace_context(
     request: MCPToolCallRequest,
     handler: Callable[[MCPToolCallRequest], Awaitable[MCPToolCallResult]],
 ) -> MCPToolCallResult:
-    """Добавляет актуальный W3C-контекст в каждый HTTP tool call."""
+    """Добавляет W3C-контекст и idempotency key в каждый HTTP tool call."""
     headers = dict(request.headers or {})
     propagate.inject(headers)
+    trace_data = get_request_trace()
+    if trace_data is not None and trace_data.request_id is not None:
+        headers[IDEMPOTENCY_KEY_HEADER] = trace_data.request_id
     return await handler(request.override(headers=headers))
 
 

@@ -6,6 +6,13 @@ from dataclasses import dataclass
 class AgentRequestTraceData:
     """Безопасные агрегаты одного RabbitMQ-запроса для корневого span."""
 
+    request_id: str | None = None
+    """Идентификатор обрабатываемого запроса.
+
+    Нужен не только телеметрии: мутирующий MCP-вызов передаёт его как
+    idempotency key, чтобы повторный захват реплики после сбоя не отправил
+    консультацию второй раз (VERA-014)."""
+
     route: str = 'unknown'
     search_required: bool = False
     search_unavailable: bool = False

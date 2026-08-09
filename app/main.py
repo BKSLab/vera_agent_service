@@ -28,8 +28,9 @@ from app.core.rate_limit import limiter
 from app.core.settings import get_settings
 from app.db.session import engine
 from app.dependencies.services import build_chat_persistence_service
+from app.exceptions.chat_turn import ChatPersistenceServiceError
 from app.graph.build import build_graph
-from app.messaging.consumer import AgentRequestConsumer
+from app.messaging.consumer import STALE_TURN_MESSAGE, AgentRequestConsumer
 from app.observability.tracing import configure_tracing, shutdown_tracing
 from app.streaming.session_bus import SessionBus
 from app.streaming.sse import create_sse_router
@@ -43,6 +44,28 @@ STARTUP_TIMEOUT_SECONDS: float = 10.0
 # I/O, поэтому SSE-роутер можно подключить сразу при определении app,
 # не дожидаясь асинхронной инициализации остальных зависимостей ниже.
 session_bus = SessionBus()
+
+
+async def _reconcile_stale_turns(stale_after_seconds: float) -> None:
+    """Закрывает реплики, брошенные упавшим процессом.
+
+    Без этого запись остаётся `processing` навсегда, если сообщение уже было
+    подтверждено до сбоя и брокер его не вернёт: пользователь при каждой
+    перезагрузке истории видел бы вечное «готовит ответ» (VERA-014).
+    Недоступность БД здесь не должна ронять старт — consumer поднимется и
+    без очистки, а следующий запуск повторит её.
+    """
+    try:
+        async with build_chat_persistence_service() as service:
+            closed = await service.reconcile_stale_turns(
+                stale_after_seconds=stale_after_seconds,
+                detail=STALE_TURN_MESSAGE,
+            )
+    except ChatPersistenceServiceError:
+        logger.exception('⚠️ Не удалось закрыть брошенные реплики при старте')
+        return
+    if closed:
+        logger.warning('⚠️ Закрыто брошенных реплик при старте: %d', closed)
 
 
 @asynccontextmanager
@@ -86,6 +109,8 @@ async def lifespan(app: FastAPI):
                 settings.mcp,
             ).compile(checkpointer=checkpointer)
 
+            await _reconcile_stale_turns(settings.rabbitmq.turn_stale_after_seconds)
+
             consumer = AgentRequestConsumer(
                 connection_url=settings.rabbitmq.url_connect,
                 queue_name=settings.rabbitmq.rabbitmq_queue,
@@ -93,6 +118,7 @@ async def lifespan(app: FastAPI):
                 graph=graph,
                 token_sink=session_bus.publish,
                 persistence_service_factory=build_chat_persistence_service,
+                lease_seconds=settings.rabbitmq.turn_lease_seconds,
             )
             logger.info('🚀 Подключение к RabbitMQ...')
             await asyncio.wait_for(consumer.start(), timeout=STARTUP_TIMEOUT_SECONDS)

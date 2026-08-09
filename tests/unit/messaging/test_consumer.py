@@ -7,7 +7,12 @@ import pytest
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import get_request_trace
-from app.services.chat_persistence import ChatPersistenceService, TurnStartResult
+from app.db.models.chat_turn import STATUS_PROCESSING
+from app.services.chat_persistence import (
+    START_CLAIMED,
+    ChatPersistenceService,
+    TurnStartResult,
+)
 
 
 class _FakeMessage:
@@ -330,8 +335,8 @@ async def test_successful_message_persists_question_answer_and_sources():
     sink = _TokenSinkRecorder()
     persistence_service = AsyncMock(spec=ChatPersistenceService)
     persistence_service.start_turn.return_value = TurnStartResult(
-        created=True,
-        status='processing',
+        outcome=START_CLAIMED,
+        status=STATUS_PROCESSING,
     )
 
     @asynccontextmanager
@@ -352,13 +357,16 @@ async def test_successful_message_persists_question_answer_and_sources():
 
     await consumer._handle_message(message)
 
-    persistence_service.start_turn.assert_awaited_once_with(
-        session_id='s1',
-        request_id='r1',
-        user_id='u1',
-        anonymous_token_hash=None,
-        question='question',
-    )
+    start_call = persistence_service.start_turn.await_args.kwargs
+    assert start_call['session_id'] == 's1'
+    assert start_call['request_id'] == 'r1'
+    assert start_call['user_id'] == 'u1'
+    assert start_call['anonymous_token_hash'] is None
+    assert start_call['question'] == 'question'
+    # Аренда обязана уходить в persistence: без неё брошенная реплика
+    # никогда не будет перезахвачена после сбоя.
+    assert start_call['worker_id']
+    assert start_call['lease_seconds'] > 0
     complete_call = persistence_service.complete_turn.await_args.kwargs
     assert complete_call['answer'] == 'Полный ответ'
     assert complete_call['sources'] == [{'document_id': 'doc-1'}]

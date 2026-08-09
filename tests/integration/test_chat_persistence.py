@@ -3,7 +3,7 @@ import pytest
 from app.messaging.schemas import AgentRequestMessage
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
-from app.services.chat_persistence import ChatPersistenceService
+from app.services.chat_persistence import START_CLAIMED, ChatPersistenceService
 
 pytestmark = pytest.mark.integration
 
@@ -47,10 +47,12 @@ async def test_validated_owner_is_persisted_on_real_postgresql(
         user_id=payload.user_id,
         anonymous_token_hash=payload.anonymous_token_hash,
         question=payload.message,
+        worker_id='worker-1',
+        lease_seconds=900.0,
     )
     saved_session = await session_repository.get_by_session_id(payload.session_id)
 
-    assert result.created is True
+    assert result.outcome == START_CLAIMED
     assert saved_session is not None
     assert saved_session.user_id == expected_user_id
     assert saved_session.anonymous_token_hash == expected_anonymous_token_hash

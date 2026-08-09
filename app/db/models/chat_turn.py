@@ -25,6 +25,38 @@ if TYPE_CHECKING:
     from app.db.models.chat_session import ChatSession
     from app.db.models.message_feedback import MessageFeedback
 
+STATUS_PROCESSING = 'processing'
+"""Реплика взята в работу; владение подтверждается непросроченным `lease_until`."""
+
+STATUS_COMPLETED = 'completed'
+"""Ответ сформирован и durable-сохранён; только для этого статуса
+отправляется `done` и разрешена оценка ответа."""
+
+STATUS_GENERATION_FAILED = 'generation_failed'
+"""Ответ не сформирован: ошибка до первого токена либо пустой поток LLM."""
+
+STATUS_STREAM_INTERRUPTED = 'stream_interrupted'
+"""Часть токенов уже отдана пользователю, после чего обработка оборвалась."""
+
+STATUS_DELIVERY_UNCONFIRMED = 'delivery_unconfirmed'
+"""Исход неизвестен: сбой сохранения после стриминга, обрыв после начала
+мутирующего инструмента или брошенная реплика с просроченным lease."""
+
+STATUS_CANCELLED = 'cancelled'
+"""Зарезервировано под явную отмену пользователем (VERA-017)."""
+
+TERMINAL_STATUSES = frozenset(
+    {
+        STATUS_COMPLETED,
+        STATUS_GENERATION_FAILED,
+        STATUS_STREAM_INTERRUPTED,
+        STATUS_DELIVERY_UNCONFIRMED,
+        STATUS_CANCELLED,
+    }
+)
+"""Статусы, из которых обработка не продолжается: повторная доставка того же
+`request_id` обязана воспроизвести сохранённый исход, а не начать заново."""
+
 
 class ChatTurn(Base):
     """Постоянная запись одного вопроса пользователя и ответа Веры."""
@@ -120,7 +152,7 @@ class ChatTurn(Base):
     status: Mapped[str] = mapped_column(
         String(length=30),
         nullable=False,
-        default='processing',
+        default=STATUS_PROCESSING,
         doc='Статус обработки реплики.',
         comment='Статус обработки реплики.',
     )
@@ -129,6 +161,32 @@ class ChatTurn(Base):
         nullable=True,
         doc='Безопасное описание ошибки.',
         comment='Безопасное описание ошибки без секретов.',
+    )
+    terminal_detail: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        doc='Текст терминального SSE-события.',
+        comment='Пользовательский текст ошибки, отправленный в терминальном SSE-событии.',
+    )
+    lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        doc='Срок аренды обработки.',
+        comment='До этого момента реплика считается обрабатываемой живым worker.',
+    )
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default='0',
+        doc='Число взятий реплики в работу.',
+        comment='Сколько раз реплика бралась в обработку, включая повторные захваты.',
+    )
+    worker_id: Mapped[str | None] = mapped_column(
+        String(length=100),
+        nullable=True,
+        doc='Идентификатор обработчика.',
+        comment='Идентификатор процесса, удерживающего текущую аренду.',
     )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

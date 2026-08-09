@@ -62,6 +62,23 @@ class RabbitMQSettings(SettingsBase):
     rabbitmq_queue: str = 'agent.requests'
     rabbitmq_dlq: str = 'agent.requests.dlq'
 
+    turn_lease_seconds: float = 900.0
+    """Срок аренды обрабатываемой реплики.
+
+    Пока аренда жива, повторная доставка того же `request_id` считается
+    настоящим дубликатом; после истечения реплику можно безопасно
+    перезахватить. Значение обязано с запасом превышать самый долгий
+    инструмент (`mcp_consultation_email_timeout_seconds`, 360 секунд).
+    """
+
+    turn_stale_after_seconds: float = 1800.0
+    """Через сколько после истечения аренды брошенная реплика закрывается.
+
+    Запас относительно `turn_lease_seconds` нужен, чтобы startup-очистка не
+    обгоняла штатную повторную доставку сразу после рестарта: иначе живой
+    запрос был бы закрыт раньше, чем брокер вернёт его сообщение.
+    """
+
     @property
     def url_connect(self) -> str:
         user = quote(self.rabbitmq_user, safe='')

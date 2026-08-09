@@ -4,11 +4,15 @@ from uuid import uuid4
 import pytest
 
 from app.db.models.chat_session import ChatSession
-from app.db.models.chat_turn import ChatTurn
+from app.db.models.chat_turn import STATUS_GENERATION_FAILED, ChatTurn
 from app.exceptions.chat_session import ChatSessionAccessDeniedError
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
-from app.services.chat_persistence import ChatPersistenceService
+from app.services.chat_persistence import (
+    START_CLAIMED,
+    START_DUPLICATE_TERMINAL,
+    ChatPersistenceService,
+)
 
 
 @pytest.mark.asyncio
@@ -32,9 +36,11 @@ async def test_start_turn_creates_session_and_processing_turn():
         user_id='user-1',
         anonymous_token_hash=None,
         question='Вопрос',
+        worker_id='worker-1',
+        lease_seconds=900.0,
     )
 
-    assert result.created is True
+    assert result.outcome == START_CLAIMED
     saved_turn = turn_repository.save.await_args.args[0]
     assert saved_turn.request_id == 'request-1'
     assert saved_turn.question == 'Вопрос'
@@ -68,9 +74,11 @@ async def test_start_turn_returns_completed_turn_without_creating_duplicate():
         user_id=None,
         anonymous_token_hash='a' * 64,
         question='Вопрос',
+        worker_id='worker-1',
+        lease_seconds=900.0,
     )
 
-    assert result.created is False
+    assert result.outcome == START_DUPLICATE_TERMINAL
     assert result.status == 'completed'
     assert result.answer == 'Ответ'
     turn_repository.save.assert_not_awaited()
@@ -95,6 +103,8 @@ async def test_start_turn_rejects_wrong_anonymous_owner():
             user_id=None,
             anonymous_token_hash='b' * 64,
             question='Вопрос',
+            worker_id='worker-1',
+            lease_seconds=900.0,
         )
 
 
@@ -147,15 +157,17 @@ async def test_fail_turn_persists_safe_failure():
 
     await service.fail_turn(
         request_id='request-1',
-        status='failed',
+        status=STATUS_GENERATION_FAILED,
         safe_error='Не удалось обработать запрос',
         answer=None,
         latency_ms=250,
+        terminal_detail='Сервис временно недоступен, попробуйте позже.',
     )
 
     turn_repository.fail.assert_awaited_once_with(
         chat_turn=chat_turn,
-        status='failed',
+        status=STATUS_GENERATION_FAILED,
+        terminal_detail='Сервис временно недоступен, попробуйте позже.',
         safe_error='Не удалось обработать запрос',
         answer=None,
         latency_ms=250,
