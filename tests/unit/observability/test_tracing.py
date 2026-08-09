@@ -26,11 +26,19 @@ from app.observability.tracing import (
 from app.streaming.session_bus import SessionBus
 
 _exporter = InMemorySpanExporter()
-reset_for_tests(_exporter)
 
 
 @pytest.fixture(autouse=True)
-def _clear_spans():
+def _isolated_tracing():
+    """Даёт каждому тесту заведомо живой провайдер и пустой экспортёр.
+
+    Одной установки провайдера на модуль недостаточно: другие тесты в том же
+    процессе поднимают lifespan приложения, который в `finally` вызывает
+    `shutdown_tracing()`. Завершённый провайдер перестаёт записывать spans, и
+    все проверки ниже молча получают пустой экспортёр — в полном прогоне это
+    давало 10 падений при зелёном запуске файла по отдельности.
+    """
+    reset_for_tests(_exporter)
     _exporter.clear()
     yield
 

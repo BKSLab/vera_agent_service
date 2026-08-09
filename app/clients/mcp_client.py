@@ -18,7 +18,6 @@ from app.observability.request_trace import get_request_trace
 from app.observability.tracing import get_tracer
 
 logger = logging.getLogger('vera_agent_service')
-tracer = get_tracer()
 
 DEFAULT_RETRY_DELAY: float = 0.5
 DEFAULT_MAX_RETRY_DELAY: float = 5.0
@@ -138,7 +137,7 @@ async def call_tool_with_retry(
             ошибка выполнения тула на MCP-сервере или неожиданный формат
             ответа (раздел 0.1: для вызывающего кода все три равнозначны).
     """
-    with tracer.start_as_current_span(
+    with get_tracer().start_as_current_span(
         f'tool.{tool.name}',
         attributes={
             SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.TOOL.value,
@@ -216,7 +215,7 @@ async def call_mutating_tool_once(
     поскольку содержат консультацию и email.
     """
     consultation_text = arguments.get('consultation_text')
-    with tracer.start_as_current_span(
+    with get_tracer().start_as_current_span(
         f'tool.{tool.name}',
         attributes={
             SpanAttributes.OPENINFERENCE_SPAN_KIND: (

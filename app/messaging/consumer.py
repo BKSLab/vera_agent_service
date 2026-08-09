@@ -29,7 +29,6 @@ from app.observability.tracing import get_tracer
 from app.services.chat_persistence import ChatPersistenceService, TurnStartResult
 
 logger = logging.getLogger('vera_agent_service')
-tracer = get_tracer()
 
 DEFAULT_RETRIES: int = 3
 DEFAULT_RETRY_DELAY: float = 1.0
@@ -169,7 +168,7 @@ class AgentRequestConsumer:
         trace_data = AgentRequestTraceData()
         context_token = set_request_trace(trace_data)
         try:
-            with tracer.start_as_current_span(
+            with get_tracer().start_as_current_span(
                 'vera.agent.request',
                 attributes={
                     SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.AGENT.value,
