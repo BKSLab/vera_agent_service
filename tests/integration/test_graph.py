@@ -15,7 +15,7 @@ from langchain_openai import ChatOpenAI
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from app.clients.mcp_client import get_mcp_client, get_tools_with_retry
-from app.core.settings import McpSettings
+from app.core.settings import GraphContextSettings, McpSettings
 from app.graph.build import build_graph
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
@@ -164,13 +164,14 @@ def _tools_by_name(tools) -> dict:
     return {tool.name: tool for tool in tools}
 
 
-def _compile_graph(chat_model, tools, settings):
+def _compile_graph(chat_model, tools, settings, context_settings=None):
     by_name = _tools_by_name(tools)
     return build_graph(
         chat_model,
         by_name['vera_rag_kb'],
         by_name['send_consultation_email'],
         settings,
+        context_settings or GraphContextSettings(),
     ).compile()
 
 
@@ -221,6 +222,53 @@ async def test_factual_question_reaches_kb_search_even_without_model_tool_call()
 
         assert result['tool_calls'] == ['vera_rag_kb']
         assert result['retrieved_chunks'] == chunks
+
+
+async def test_context_budget_trims_old_turns_without_losing_current_answer():
+    """VERA-020: превышение token budget не роняет запрос и не теряет
+    последний turn — старые реплики схлопываются в одну сводку, а вопрос
+    текущей реплики по-прежнему доходит до модели и получает ответ."""
+    app = create_mock_mcp_app(fail_message='vera_rag_kb не должен вызываться для этого вопроса')
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=1)
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=5.0)
+
+        captured: dict = {}
+
+        def handler(request):
+            payload = json.loads(request.content)
+            captured['message_count'] = len(payload['messages'])
+            if not payload.get('stream'):
+                return _direct_completion('ok')
+            return _stream_response(['Ответ на последний вопрос.'])
+
+        chat_model = _build_chat_model(handler)
+        context_settings = GraphContextSettings(
+            context_max_turns=1, context_older_turns_summary_max_chars=100
+        )
+        graph = _compile_graph(chat_model, tools, mcp_settings, context_settings=context_settings)
+
+        history: list = []
+        for i in range(1, 6):
+            history.append(HumanMessage(content=f'Вопрос {i}'))
+            history.append(AIMessage(content=f'Ответ {i}'))
+        history.append(HumanMessage(content='Последний вопрос'))
+        state = {
+            'session_id': 's',
+            'user_id': None,
+            'messages': history,
+            'retrieved_chunks': [],
+            'tool_calls': [],
+            'search_unavailable': False,
+        }
+
+        result = await graph.ainvoke(state)
+
+        assert result['messages'][-1].content == 'Ответ на последний вопрос.'
+        # SYSTEM_PROMPT + одна сводка старых реплик + последний вопрос — вместо
+        # SYSTEM_PROMPT + 11 сообщений полной истории без бюджета.
+        assert captured['message_count'] == 3
 
 
 async def test_greeting_goes_directly_to_generate_direct_without_mcp_call():

@@ -4,6 +4,7 @@ import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import tool
 
+from app.core.settings import GraphContextSettings
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -11,6 +12,8 @@ from app.observability.request_trace import (
     set_request_trace,
 )
 from tests.unit.graph._mock_llm import chat_model_with_handler
+
+_CONTEXT_SETTINGS = GraphContextSettings()
 
 
 @tool
@@ -87,6 +90,7 @@ async def test_returns_tool_call_message_when_tool_needed():
         chat_model,
         vera_rag_kb,
         send_consultation_email,
+        _CONTEXT_SETTINGS,
     )
 
     trace_data = AgentRequestTraceData()
@@ -114,6 +118,7 @@ async def test_returns_empty_update_when_tool_not_needed():
         chat_model,
         vera_rag_kb,
         send_consultation_email,
+        _CONTEXT_SETTINGS,
     )
 
     trace_data = AgentRequestTraceData()
@@ -140,7 +145,7 @@ async def test_consultation_email_tool_call_is_dropped_without_prior_confirmatio
         lambda request: _tool_call_response('send_consultation_email', arguments),
         streaming=False,
     )
-    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
 
     trace_data = AgentRequestTraceData()
     token = set_request_trace(trace_data)
@@ -161,7 +166,7 @@ async def test_consultation_email_tool_call_is_dropped_when_email_missing_from_c
         lambda request: _tool_call_response('send_consultation_email', arguments),
         streaming=False,
     )
-    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
     history = [
         HumanMessage(content='Отправь мне итог консультации на почту'),
         AIMessage(content='Подтвердите, пожалуйста, ваш email?'),
@@ -187,7 +192,7 @@ async def test_consultation_email_tool_call_is_allowed_after_explicit_confirmati
         lambda request: _tool_call_response('send_consultation_email', arguments),
         streaming=False,
     )
-    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
     history = [
         HumanMessage(content='Отправь мне итог консультации на почту'),
         AIMessage(content='Подтвердите, пожалуйста, ваш email?'),
@@ -216,7 +221,7 @@ async def test_factual_question_without_tool_call_is_forced_into_kb_search():
         lambda request: _direct_response('Квота обычно небольшая.'),
         streaming=False,
     )
-    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
 
     trace_data = AgentRequestTraceData()
     token = set_request_trace(trace_data)
@@ -236,7 +241,7 @@ async def test_factual_question_without_tool_call_is_forced_into_kb_search():
 
 async def test_non_factual_greeting_without_tool_call_stays_direct():
     chat_model = chat_model_with_handler(lambda request: _direct_response('Привет!'), streaming=False)
-    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
 
     trace_data = AgentRequestTraceData()
     token = set_request_trace(trace_data)

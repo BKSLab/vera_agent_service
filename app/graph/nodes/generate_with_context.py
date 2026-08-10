@@ -5,6 +5,8 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.clients.llm import astream_tokens
+from app.core.settings import GraphContextSettings
+from app.graph.context_budget import build_bounded_messages
 from app.graph.prompts.context import (
     NO_ANSWER_INSTRUCTION,
     SEARCH_UNAVAILABLE_INSTRUCTION,
@@ -16,6 +18,7 @@ from app.graph.state import AgentState
 
 def create_generate_with_context_node(
     chat_model: ChatOpenAI,
+    context_settings: GraphContextSettings,
 ) -> Callable[[AgentState], Coroutine[Any, Any, dict]]:
     """Создаёт узел `generate_with_context` (Этап 4.3) — стримингованная
     финальная генерация с чанками `vera_rag_kb` в контексте.
@@ -31,6 +34,11 @@ def create_generate_with_context_node(
     через `graph.astream_events(...)`, перехватывая события
     `on_chat_model_stream`, которые LangGraph автоматически генерирует по
     мере вызова модели внутри узла.
+
+    Модели передаётся ограниченное по бюджету представление истории
+    (`context_settings`, VERA-020) — найденные чанки берутся из
+    `state['retrieved_chunks']` независимо от бюджета, поэтому усечение
+    старых реплик не влияет на ответ текущего turn'а.
     """
 
     async def generate_with_context(state: AgentState) -> dict:
@@ -41,9 +49,14 @@ def create_generate_with_context_node(
         else:
             instruction = format_chunks_instruction(state['retrieved_chunks'])
 
+        bounded_history = build_bounded_messages(
+            state['messages'],
+            max_turns=context_settings.context_max_turns,
+            older_turns_summary_max_chars=context_settings.context_older_turns_summary_max_chars,
+        )
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
-            *state['messages'],
+            *bounded_history,
             SystemMessage(content=instruction),
         ]
 

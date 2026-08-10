@@ -1,4 +1,3 @@
-import json
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -13,6 +12,28 @@ from app.observability.request_trace import get_request_trace
 from app.schemas.mcp_tool_results import KbSearchToolResult
 
 SEARCH_UNAVAILABLE_TOOL_MESSAGE = 'Поиск по базе знаний временно недоступен.'
+
+
+def _build_history_summary(chunks: list[dict]) -> str:
+    """Короткая сводка результата поиска для `ToolMessage`, сохраняемого в
+    `messages` (VERA-020) — вместо полного JSON чанков.
+
+    Полный текст чанков остаётся доступен модели ТОЛЬКО в текущем вызове
+    `generate_with_context` через `state['retrieved_chunks']` (см.
+    `create_generate_with_context_node`) и отдельно персистируется как
+    `sources` реплики. В историю диалога, которая переотправляется модели
+    на каждом следующем turn'е, попадают только идентификаторы — это и
+    убирает раздувание контекста сырыми результатами RAG.
+    """
+    if not chunks:
+        return 'Поиск по базе знаний не нашёл релевантных чанков по этому запросу.'
+    chunk_ids = [str(chunk['chunk_id']) for chunk in chunks if chunk.get('chunk_id')]
+    identifiers = ', '.join(chunk_ids) if chunk_ids else 'без идентификаторов'
+    return (
+        f'Найдено {len(chunks)} релевантных чанков базы знаний '
+        f'(идентификаторы: {identifiers}). Полный текст использован для '
+        'ответа в этой реплике и не хранится в истории диалога.'
+    )
 
 
 def create_call_kb_search_node(
@@ -61,7 +82,7 @@ def create_call_kb_search_node(
         if trace_data is not None:
             trace_data.search_chunk_count = len(chunks)
         tool_message = ToolMessage(
-            content=json.dumps(result, ensure_ascii=False), tool_call_id=tool_call['id']
+            content=_build_history_summary(chunks), tool_call_id=tool_call['id']
         )
         return {
             'messages': [tool_message],

@@ -2,7 +2,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
-from app.core.settings import McpSettings
+from app.core.settings import GraphContextSettings, McpSettings
 from app.graph.edges import route_after_analyze_intent
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
 from app.graph.nodes.call_consultation_email import (
@@ -19,6 +19,7 @@ def build_graph(
     kb_search_tool: BaseTool,
     consultation_email_tool: BaseTool,
     mcp_settings: McpSettings,
+    context_settings: GraphContextSettings,
 ) -> StateGraph:
     """Собирает граф агента (`AGENT_VERA_ARCHITECTURE.md`,
     раздел "Граф агента Веры"):
@@ -40,6 +41,7 @@ def build_graph(
             chat_model,
             kb_search_tool,
             consultation_email_tool,
+            context_settings,
         ),
     )
     builder.add_node('call_kb_search', create_call_kb_search_node(kb_search_tool, mcp_settings))
@@ -50,8 +52,11 @@ def build_graph(
             mcp_settings,
         ),
     )
-    builder.add_node('generate_with_context', create_generate_with_context_node(chat_model))
-    builder.add_node('generate_direct', create_generate_direct_node(chat_model))
+    builder.add_node(
+        'generate_with_context',
+        create_generate_with_context_node(chat_model, context_settings),
+    )
+    builder.add_node('generate_direct', create_generate_direct_node(chat_model, context_settings))
 
     builder.add_edge(START, 'analyze_intent')
     builder.add_conditional_edges(

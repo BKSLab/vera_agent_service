@@ -10,6 +10,8 @@ from app.clients.mcp_client import (
     SEND_CONSULTATION_EMAIL_TOOL_NAME,
     VERA_RAG_KB_TOOL_NAME,
 )
+from app.core.settings import GraphContextSettings
+from app.graph.context_budget import build_bounded_messages
 from app.graph.policy import (
     consultation_email_send_is_confirmed,
     find_last_human_message,
@@ -29,6 +31,7 @@ def create_analyze_intent_node(
     chat_model: ChatOpenAI,
     kb_search_tool: BaseTool,
     consultation_email_tool: BaseTool,
+    context_settings: GraphContextSettings,
 ) -> Callable[[AgentState], Coroutine[Any, Any, dict]]:
     """Создаёт узел `analyze_intent` (Этап 4.1).
 
@@ -43,13 +46,22 @@ def create_analyze_intent_node(
     Два решения модели дополнительно проверяются кодом (VERA-021), а не
     принимаются как есть: мутирующая отправка консультации и отказ от
     поиска по базе знаний на фактическом/правовом вопросе.
+
+    Модели передаётся не вся `state['messages']`, а ограниченное по
+    бюджету представление (`context_settings`, VERA-020) — полная история
+    остаётся в Redis-checkpoint'е и в PostgreSQL без изменений.
     """
     model_with_tools = chat_model.bind_tools(
         [kb_search_tool, consultation_email_tool]
     )
 
     async def analyze_intent(state: AgentState) -> dict:
-        messages = [SystemMessage(content=SYSTEM_PROMPT), *state['messages']]
+        bounded_history = build_bounded_messages(
+            state['messages'],
+            max_turns=context_settings.context_max_turns,
+            older_turns_summary_max_chars=context_settings.context_older_turns_summary_max_chars,
+        )
+        messages = [SystemMessage(content=SYSTEM_PROMPT), *bounded_history]
         response = await ainvoke_with_retry(model_with_tools, messages)
         trace_data = get_request_trace()
 

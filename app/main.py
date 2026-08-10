@@ -130,6 +130,7 @@ async def lifespan(app: FastAPI):
                 kb_search_tool,
                 consultation_email_tool,
                 settings.mcp,
+                settings.graph_context,
             ).compile(checkpointer=checkpointer)
 
             await _reconcile_stale_turns(settings.rabbitmq.turn_stale_after_seconds)

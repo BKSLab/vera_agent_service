@@ -178,6 +178,23 @@ class McpSettings(SettingsBase):
     PDF-рендер и SMTP. Внешние retries для неё запрещены."""
 
 
+class GraphContextSettings(SettingsBase):
+    """Бюджет контекста, передаваемого модели графом (VERA-020).
+
+    Полная история диалога продолжает накапливаться в Redis-checkpoint'е и
+    в PostgreSQL без ограничения — эти настройки ограничивают только то,
+    что уходит в конкретный вызов LLM (`app/graph/context_budget.py`).
+    """
+
+    context_max_turns: int = Field(default=12, ge=1)
+    """Сколько последних реплик (вопрос пользователя + ответ ассистента, с
+    учётом промежуточных tool-сообщений) передаются модели полностью."""
+
+    context_older_turns_summary_max_chars: int = Field(default=800, ge=0)
+    """Максимальная длина безопасной текстовой выжимки одной более старой
+    реплики в сводном `SystemMessage`. `0` — выжимка не обрезается."""
+
+
 class ObservabilitySettings(SettingsBase):
     """Настройки экспорта трейсов в Arize Phoenix (Этап 9, AGENT_SERVICE_PLAN.md)."""
 
@@ -198,6 +215,7 @@ class Settings(BaseSettings):
     redis: RedisSettings = Field(default_factory=RedisSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
+    graph_context: GraphContextSettings = Field(default_factory=GraphContextSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
 
     @model_validator(mode='after')

@@ -5,19 +5,30 @@ from langchain_core.messages import AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from app.clients.llm import astream_tokens
+from app.core.settings import GraphContextSettings
+from app.graph.context_budget import build_bounded_messages
 from app.graph.prompts.system import SYSTEM_PROMPT
 from app.graph.state import AgentState
 
 
 def create_generate_direct_node(
     chat_model: ChatOpenAI,
+    context_settings: GraphContextSettings,
 ) -> Callable[[AgentState], Coroutine[Any, Any, dict]]:
     """Создаёт узел `generate_direct` (Этап 4.4) — стримингованный прямой
     ответ без вызова инструмента. См. docstring
-    `create_generate_with_context_node` про механизм стриминга наружу."""
+    `create_generate_with_context_node` про механизм стриминга наружу.
+
+    Модели передаётся ограниченное по бюджету представление истории
+    (`context_settings`, VERA-020), не вся `state['messages']`."""
 
     async def generate_direct(state: AgentState) -> dict:
-        messages = [SystemMessage(content=SYSTEM_PROMPT), *state['messages']]
+        bounded_history = build_bounded_messages(
+            state['messages'],
+            max_turns=context_settings.context_max_turns,
+            older_turns_summary_max_chars=context_settings.context_older_turns_summary_max_chars,
+        )
+        messages = [SystemMessage(content=SYSTEM_PROMPT), *bounded_history]
 
         full_text = ''
         async for token in astream_tokens(chat_model, messages):

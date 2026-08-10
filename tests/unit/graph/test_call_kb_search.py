@@ -83,6 +83,24 @@ async def test_successful_search_updates_state_with_chunks():
     assert trace_data.search_unavailable is False
 
 
+async def test_successful_search_does_not_store_raw_chunk_text_in_history():
+    """VERA-020: сырой текст чанка не должен попадать в `ToolMessage`,
+    сохраняемый в `messages` — иначе он переотправляется модели на каждом
+    следующем turn'е. Ссылка (идентификатор) остаётся."""
+    secret_text = 'СЕКРЕТНЫЙ_ТЕКСТ_ЧАНКА_НЕ_ДОЛЖЕН_ХРАНИТЬСЯ_В_ИСТОРИИ'
+    tool = _FakeTool(
+        result=[{'type': 'text', 'text': f'{{"chunks": [{{"chunk_id": "c1", "text": "{secret_text}"}}]}}'}]
+    )
+
+    result, _ = await _run_node(tool)
+
+    tool_message = result['messages'][0]
+    assert secret_text not in tool_message.content
+    assert 'c1' in tool_message.content
+    # Полный текст остаётся доступен для ЭТОЙ реплики через retrieved_chunks.
+    assert result['retrieved_chunks'][0]['text'] == secret_text
+
+
 async def test_empty_chunks_is_not_treated_as_unavailable():
     """RAG честно вернул "нет ответа" — search_unavailable остаётся False."""
     tool = _FakeTool(result=[{'type': 'text', 'text': '{"chunks": []}'}])

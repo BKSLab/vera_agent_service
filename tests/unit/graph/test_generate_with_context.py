@@ -3,8 +3,11 @@ import json
 import httpx
 from langchain_core.messages import HumanMessage
 
+from app.core.settings import GraphContextSettings
 from app.graph.nodes.generate_with_context import create_generate_with_context_node
 from tests.unit.graph._mock_llm import chat_model_with_handler, stream_response
+
+_CONTEXT_SETTINGS = GraphContextSettings()
 
 
 def _state(retrieved_chunks, search_unavailable):
@@ -37,7 +40,7 @@ async def test_branch_with_chunks_includes_chunk_text_in_instruction():
         )
 
     chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model)
+    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
     chunks = [
         {
             'chunk_id': 'c1',
@@ -69,7 +72,7 @@ async def test_branch_with_chunks_marks_missing_source_details_without_inventing
         return stream_response(['Ответ.', ' Основание: источник из базы знаний.'])
 
     chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model)
+    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
     chunks = [{'chunk_id': 'c1', 'source_title': 'Разъяснение Роструда', 'text': 'Текст нормы'}]
 
     await node(_state(chunks, search_unavailable=False))
@@ -88,7 +91,7 @@ async def test_branch_no_answer_when_chunks_empty_and_search_available():
         return stream_response(['В базе знаний нет ответа на этот вопрос.'])
 
     chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model)
+    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
 
     result = await node(_state([], search_unavailable=False))
 
@@ -105,7 +108,7 @@ async def test_branch_search_unavailable_differs_from_no_answer_branch():
         return stream_response(['Поиск сейчас недоступен, попробуйте позже.'])
 
     chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model)
+    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
 
     result = await node(_state([], search_unavailable=True))
 
