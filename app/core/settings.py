@@ -1,7 +1,7 @@
 from functools import lru_cache
 from urllib.parse import quote
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,38 @@ class AppSettings(SettingsBase):
     admin_password: SecretStr
     admin_session_https_only: bool = False
     api_key: SecretStr
+
+
+class StreamingSettings(SettingsBase):
+    """Ограничения in-memory SSE transport одного процесса."""
+
+    sse_subscriber_queue_max_events: int = Field(default=256, ge=1)
+    sse_late_buffer_max_events: int = Field(default=256, ge=1)
+    sse_late_buffer_max_requests: int = Field(default=1024, ge=1)
+    sse_request_state_max_entries: int = Field(default=2048, ge=1)
+    sse_late_buffer_ttl_seconds: float = Field(default=60.0, gt=0)
+    sse_buffer_cleanup_interval_seconds: float = Field(default=15.0, gt=0)
+    sse_heartbeat_interval_seconds: float = Field(default=15.0, gt=0)
+    sse_request_deadline_seconds: float = Field(default=420.0, ge=360.0)
+    """Deadline больше 360-секундного timeout consultation email tool."""
+
+    @model_validator(mode='after')
+    def validate_buffer_fits_subscriber_queue(self) -> 'StreamingSettings':
+        if (
+            self.sse_late_buffer_max_events
+            > self.sse_subscriber_queue_max_events
+        ):
+            raise ValueError(
+                'SSE late buffer не может быть больше subscriber queue'
+            )
+        if (
+            self.sse_late_buffer_max_requests
+            > self.sse_request_state_max_entries
+        ):
+            raise ValueError(
+                'Лимит SSE late buffers не может быть больше общего лимита state'
+            )
+        return self
 
 
 class DBSettings(SettingsBase):
@@ -160,12 +192,24 @@ class Settings(BaseSettings):
     """Агрегатор всех доменных настроек проекта."""
 
     app: AppSettings = Field(default_factory=AppSettings)
+    streaming: StreamingSettings = Field(default_factory=StreamingSettings)
     db: DBSettings = Field(default_factory=DBSettings)
     rabbitmq: RabbitMQSettings = Field(default_factory=RabbitMQSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     llm: LlmSettings = Field(default_factory=LlmSettings)
     mcp: McpSettings = Field(default_factory=McpSettings)
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+
+    @model_validator(mode='after')
+    def validate_stream_deadline_covers_longest_tool(self) -> 'Settings':
+        if (
+            self.streaming.sse_request_deadline_seconds
+            < self.mcp.mcp_consultation_email_timeout_seconds
+        ):
+            raise ValueError(
+                'SSE request deadline не может быть короче timeout consultation email tool'
+            )
+        return self
 
 
 @lru_cache

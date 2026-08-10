@@ -83,6 +83,7 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
 
     try:
         received: list[dict] = []
+        event_ids: list[int] = []
 
         async def read_sse():
             async with http_client.stream(
@@ -90,6 +91,8 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
                 f'/sse/{request_id}?ticket={ticket}',
             ) as response:
                 async for line in response.aiter_lines():
+                    if line.startswith('id: '):
+                        event_ids.append(int(line.removeprefix('id: ')))
                     if line.startswith('data: '):
                         received.append(json.loads(line.removeprefix('data: ')))
 
@@ -123,3 +126,5 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
         {'type': 'token', 'content': 'составляет 2%.'},
         {'type': 'done'},
     ]
+    assert event_ids == [1, 2, 3]
+    assert sum(event['type'] in ('done', 'error') for event in received) == 1

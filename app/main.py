@@ -44,7 +44,22 @@ STARTUP_TIMEOUT_SECONDS: float = 10.0
 # Создаётся сразу, не в lifespan — конструктор SessionBus синхронный, без
 # I/O, поэтому SSE-роутер можно подключить сразу при определении app,
 # не дожидаясь асинхронной инициализации остальных зависимостей ниже.
-session_bus = SessionBus()
+streaming_settings = get_settings().streaming
+session_bus = SessionBus(
+    buffer_seconds=streaming_settings.sse_late_buffer_ttl_seconds,
+    subscriber_queue_max_events=(
+        streaming_settings.sse_subscriber_queue_max_events
+    ),
+    buffer_max_events=streaming_settings.sse_late_buffer_max_events,
+    buffer_max_requests=streaming_settings.sse_late_buffer_max_requests,
+    state_max_entries=streaming_settings.sse_request_state_max_entries,
+    cleanup_interval_seconds=(
+        streaming_settings.sse_buffer_cleanup_interval_seconds
+    ),
+    request_deadline_seconds=(
+        streaming_settings.sse_request_deadline_seconds
+    ),
+)
 
 
 async def _reconcile_stale_turns(stale_after_seconds: float) -> None:
@@ -77,6 +92,8 @@ async def lifespan(app: FastAPI):
     try:
         async with AsyncExitStack() as stack:
             stack.push_async_callback(external_api_http_client.aclose)
+            await session_bus.start()
+            stack.push_async_callback(session_bus.stop)
 
             logger.info('🚀 Проверка подключения к PostgreSQL...')
             async with engine.connect() as connection:
@@ -153,6 +170,9 @@ app.include_router(
     create_sse_router(
         session_bus,
         StreamTicketVerifier(get_settings().app.api_key.get_secret_value()),
+        heartbeat_interval_seconds=(
+            streaming_settings.sse_heartbeat_interval_seconds
+        ),
     )
 )
 app.include_router(chat_history_router, prefix='/api/v1')

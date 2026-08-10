@@ -1,6 +1,14 @@
 import pytest
+from pydantic import ValidationError
 
-from app.core.settings import DBSettings, RabbitMQSettings, RedisSettings
+from app.core.settings import (
+    DBSettings,
+    McpSettings,
+    RabbitMQSettings,
+    RedisSettings,
+    Settings,
+    StreamingSettings,
+)
 
 
 @pytest.mark.parametrize(
@@ -42,3 +50,38 @@ def test_connection_url_percent_encodes_reserved_components(
     expected_url: str,
 ) -> None:
     assert settings.url_connect == expected_url
+
+
+def test_streaming_deadline_covers_longest_tool_timeout() -> None:
+    assert StreamingSettings().sse_request_deadline_seconds >= 360
+
+
+def test_streaming_deadline_rejects_value_shorter_than_longest_tool() -> None:
+    with pytest.raises(ValidationError):
+        StreamingSettings(sse_request_deadline_seconds=359)
+
+
+def test_late_buffer_must_fit_subscriber_queue() -> None:
+    with pytest.raises(ValidationError, match='late buffer'):
+        StreamingSettings(
+            sse_subscriber_queue_max_events=1,
+            sse_late_buffer_max_events=2,
+        )
+
+
+def test_late_buffer_request_limit_must_fit_total_state_limit() -> None:
+    with pytest.raises(ValidationError, match='общего лимита state'):
+        StreamingSettings(
+            sse_late_buffer_max_requests=2,
+            sse_request_state_max_entries=1,
+        )
+
+
+def test_streaming_deadline_uses_configured_email_tool_timeout() -> None:
+    settings = Settings.model_construct(
+        streaming=StreamingSettings(sse_request_deadline_seconds=420),
+        mcp=McpSettings(mcp_consultation_email_timeout_seconds=421),
+    )
+
+    with pytest.raises(ValueError, match='consultation email'):
+        settings.validate_stream_deadline_covers_longest_tool()
