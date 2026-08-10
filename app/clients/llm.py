@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage
 from langchain_openai import ChatOpenAI
 from openai import APIConnectionError, APITimeoutError
 
@@ -121,50 +121,63 @@ async def astream_tokens(
 ) -> AsyncIterator[str]:
     """Стримингованный вызов модели (генерация ответа, Этап 4.3/4.4).
 
-    Ретраится только получение **первого** чанка — как только хотя бы один
-    токен отдан вызывающему коду, повтор всего вызова прекращается и любая
-    следующая ошибка всплывает немедленно. Согласуется с решением раздела
-    0.1 плана: RabbitMQ-consumer (Этап 6.3) не переигрывает сообщение после
-    того как стриминг клиенту уже начался — тот же принцип применяется и
-    здесь, на уровне отдельного вызова LLM.
+    Ретраится получение **первого видимого текстового токена** — технический
+    chunk с ролью, reasoning или tool-call без текста не считается началом
+    ответа. Как только хотя бы один текстовый токен отдан вызывающему коду,
+    повтор всего вызова прекращается и любая следующая ошибка всплывает
+    немедленно. Согласуется с решением раздела 0.1 плана.
 
     Raises:
-        LlmApiRequestError: если не удалось получить даже первый чанк после
-            исчерпания попыток.
+        LlmApiRequestError: если после всех попыток не получен видимый текст.
     """
     last_error: Exception | None = None
-    stream: AsyncIterator[AIMessageChunk] | None = None
-    first_chunk: AIMessageChunk | None = None
 
     for attempt in range(1, retries + 1):
-        stream = model.astream(messages)
+        visible_text_started = False
         try:
-            first_chunk = await anext(stream, None)
+            async for chunk in model.astream(messages):
+                content = chunk.content
+                if not isinstance(content, str) or not content:
+                    continue
+                visible_text_started = True
+                yield content
         except _REQUEST_ERRORS as error:
             last_error = error
             logger.warning(
-                '⚠️ Ошибка запроса к LLM при старте стриминга (попытка %d/%d): %s', attempt, retries, error
+                '⚠️ Ошибка запроса к LLM при старте стриминга '
+                '(попытка %d/%d): %s',
+                attempt,
+                retries,
+                error,
             )
-            if attempt < retries:
-                delay = _get_backoff_delay(attempt)
-                logger.info('🔄 Повтор через %.1fс (следующая попытка: %d/%d)', delay, attempt + 1, retries)
-                await asyncio.sleep(delay)
-            continue
+            if visible_text_started:
+                raise
         else:
-            if attempt > 1:
-                logger.info('✅ Стриминг начат с %d-й попытки', attempt)
-            break
-    else:
-        logger.error(
-            '❌ Не удалось начать стриминг ответа LLM после %d попыток. Последняя ошибка: %s',
-            retries,
-            last_error,
-        )
-        raise LlmApiRequestError(str(last_error))
+            if visible_text_started:
+                if attempt > 1:
+                    logger.info('✅ Стриминг начат с %d-й попытки', attempt)
+                return
+            last_error = ValueError('LLM завершила поток без видимого текста')
+            logger.warning(
+                '📭 Пустой поток LLM без видимого текста (попытка %d/%d)',
+                attempt,
+                retries,
+            )
 
-    if first_chunk is not None and first_chunk.content:
-        yield first_chunk.content
-    if stream is not None:
-        async for chunk in stream:
-            if chunk.content:
-                yield chunk.content
+        if attempt < retries:
+            delay = _get_backoff_delay(attempt)
+            logger.info(
+                '🔄 Повтор через %.1fс (следующая попытка: %d/%d)',
+                delay,
+                attempt + 1,
+                retries,
+            )
+            await asyncio.sleep(delay)
+
+    logger.error(
+        '❌ Не удалось получить видимый текст от LLM после %d попыток. '
+        'Последняя ошибка: %s',
+        retries,
+        last_error,
+    )
+    raise LlmApiRequestError(str(last_error))

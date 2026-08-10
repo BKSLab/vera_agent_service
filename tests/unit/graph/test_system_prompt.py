@@ -2,6 +2,7 @@ from app.graph.prompts.description import VERA_DESCRIPTION_PROMPT
 from app.graph.prompts.role import VERA_ROLE_PROMPT
 from app.graph.prompts.system import (
     CONSULTATION_EMAIL_PROMPT,
+    FINAL_RESPONSE_SYSTEM_PROMPT,
     SOURCES_PROMPT,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_PARTS,
@@ -120,6 +121,13 @@ def test_prompt_explicitly_forbids_markdown():
     assert 'markdown-заголовки' in lowered
     assert 'маркированные или нумерованные списки' in lowered
     assert 'markdown-ссылки' in lowered
+
+
+def test_final_response_prompt_does_not_expose_tool_routing_instructions():
+    lowered = FINAL_RESPONSE_SYSTEM_PROMPT.lower()
+    assert 'не имитируй их вызов текстом' in lowered
+    assert 'call:' in lowered
+    assert 'вызывай этот инструмент только' not in lowered
 
 
 def test_prompt_is_assembled_from_explicit_parts_without_internal_line_wrapping():

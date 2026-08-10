@@ -3,11 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_core.messages import AIMessage
 
+from app.db.models.chat_turn import STATUS_PROCESSING
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import get_request_trace
-from app.db.models.chat_turn import STATUS_PROCESSING
 from app.services.chat_persistence import (
     START_CLAIMED,
     ChatPersistenceService,
@@ -218,6 +219,41 @@ async def test_ignores_stream_events_without_confirmed_graph_node():
     assert message.acked
     assert sink.calls == [
         ('r1', {'type': 'token', 'content': 'Финальный ответ.'}),
+        ('r1', {'type': 'done'}),
+    ]
+
+
+async def test_streams_code_authored_final_message_when_model_was_not_called():
+    graph = _FakeGraph(
+        [
+            [
+                {
+                    'event': 'on_chain_end',
+                    'parent_ids': [],
+                    'data': {
+                        'output': {
+                            'messages': [
+                                AIMessage(content='Безопасный ответ без вызова модели.'),
+                            ],
+                            'retrieved_chunks': [],
+                            'tool_calls': [],
+                        }
+                    },
+                }
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "send"}'
+    )
+
+    await consumer._handle_message(message)
+
+    assert message.acked
+    assert sink.calls == [
+        ('r1', {'type': 'token', 'content': 'Безопасный ответ без вызова модели.'}),
         ('r1', {'type': 'done'}),
     ]
 

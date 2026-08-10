@@ -251,6 +251,33 @@ async def test_consultation_email_tool_call_is_allowed_when_address_was_given_in
     assert trace_data.route == 'consultation_email'
 
 
+async def test_consultation_email_confirmation_ignores_empty_retry_messages():
+    """Пустые AI-сообщения от старого retry не должны скрывать последний
+    содержательный вопрос-подтверждение и блокировать реальную отправку."""
+    arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response('send_consultation_email', arguments),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
+    history = [
+        HumanMessage(content='Отправь на user@example.com'),
+        AIMessage(content='Подтвердите отправку?'),
+        AIMessage(content=''),
+        AIMessage(content=''),
+        HumanMessage(content='Да, отправляй'),
+    ]
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state_with_messages(history))
+    finally:
+        reset_request_trace(token)
+
+    assert result['messages'][0].tool_calls[0]['name'] == 'send_consultation_email'
+
+
 async def test_factual_question_without_tool_call_is_forced_into_kb_search():
     """Модель ошибочно решила ответить напрямую на вопрос из предметной
     области базы знаний — код принудительно направляет его в поиск

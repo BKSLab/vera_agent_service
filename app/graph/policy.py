@@ -28,6 +28,28 @@ tool_call модели (VERA-021, регрессия исправлена): бе
 о блокировке, может воспроизвести текстовый псевдовызов инструмента вместо
 обычного ответа — именно это и происходило до фикса."""
 
+CONSULTATION_EMAIL_BLOCKED_RESPONSE = (
+    'Подтвердите, пожалуйста, адрес электронной почты и отправку консультации?'
+)
+"""Детерминированный ответ при отклонённом mutating tool-call.
+
+В этой ветке модель не вызывается: prompt-инструкция сама по себе не является
+контролем побочного эффекта и может быть проигнорирована моделью (VERA-021).
+"""
+
+PSEUDO_TOOL_CALL_MARKERS = (
+    'call:default_api:',
+    'send_consultation_email{',
+    'send_consultation_email(',
+)
+
+
+def contains_pseudo_tool_call(text: str) -> bool:
+    """Распознаёт служебный синтаксис инструмента, утёкший в обычный текст."""
+    normalized = text.lower().replace(' ', '')
+    return any(marker in normalized for marker in PSEUDO_TOOL_CALL_MARKERS)
+
+
 _FACTUAL_LEGAL_KEYWORDS = (
     'закон',
     'кодекс',
@@ -119,6 +141,8 @@ def consultation_email_send_is_confirmed(messages: list[BaseMessage], email: str
             message
             for message in reversed(messages[:last_human_position])
             if isinstance(message, AIMessage)
+            and isinstance(message.content, str)
+            and message.content.strip()
         ),
         None,
     )

@@ -182,3 +182,43 @@ async def test_astream_tokens_does_not_retry_after_first_chunk_was_yielded():
 
     assert collected == ['первый-чанк']
     assert fake_model.call_count == 1
+
+
+class _FakeTechnicalFirstChunkModel:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def astream(self, messages) -> AsyncIterator[AIMessageChunk]:
+        self.call_count += 1
+        yield AIMessageChunk(content='')
+        yield AIMessageChunk(content='Видимый ответ')
+
+
+async def test_astream_tokens_ignores_empty_technical_chunk_before_text():
+    fake_model = _FakeTechnicalFirstChunkModel()
+
+    collected = [chunk async for chunk in astream_tokens(fake_model, [HumanMessage(content='hi')])]
+
+    assert collected == ['Видимый ответ']
+    assert fake_model.call_count == 1
+
+
+class _FakeEmptyThenTextModel:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def astream(self, messages) -> AsyncIterator[AIMessageChunk]:
+        self.call_count += 1
+        if self.call_count == 1:
+            yield AIMessageChunk(content='')
+            return
+        yield AIMessageChunk(content='После повтора')
+
+
+async def test_astream_tokens_retries_when_stream_ends_without_visible_text():
+    fake_model = _FakeEmptyThenTextModel()
+
+    collected = [chunk async for chunk in astream_tokens(fake_model, [HumanMessage(content='hi')], retries=3)]
+
+    assert collected == ['После повтора']
+    assert fake_model.call_count == 2
