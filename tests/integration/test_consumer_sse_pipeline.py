@@ -7,6 +7,7 @@ AgentRequestConsumer -> SessionBus (как TokenSink) -> реальный SSE-к
 
 import asyncio
 import json
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -19,6 +20,8 @@ from app.core.settings import get_settings
 from app.messaging.consumer import AgentRequestConsumer
 from app.streaming.session_bus import SessionBus
 from app.streaming.sse import create_sse_router
+from app.streaming.ticket import StreamTicketVerifier
+from tests.fixtures.stream_ticket import create_stream_ticket
 
 pytestmark = pytest.mark.integration
 
@@ -61,15 +64,31 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
     )
     await consumer.start()
 
+    stream_api_key = 'pipeline-test-key'
+    ticket = create_stream_ticket(
+        api_key=stream_api_key,
+        request_id=request_id,
+        session_id=session_id,
+        user_id='integration-user',
+        expires_at=int(time.time()) + 60,
+    )
     app = FastAPI()
-    app.include_router(create_sse_router(session_bus))
+    app.include_router(
+        create_sse_router(
+            session_bus,
+            StreamTicketVerifier(stream_api_key),
+        )
+    )
     http_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test')
 
     try:
         received: list[dict] = []
 
         async def read_sse():
-            async with http_client.stream('GET', f'/sse/{request_id}') as response:
+            async with http_client.stream(
+                'GET',
+                f'/sse/{request_id}?ticket={ticket}',
+            ) as response:
                 async for line in response.aiter_lines():
                     if line.startswith('data: '):
                         received.append(json.loads(line.removeprefix('data: ')))

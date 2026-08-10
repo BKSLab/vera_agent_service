@@ -2,6 +2,8 @@ import asyncio
 import logging
 import time
 
+from app.exceptions.streaming import SessionAlreadySubscribedError
+
 logger = logging.getLogger('vera_agent_service')
 
 LATE_CONNECT_BUFFER_SECONDS: float = 60.0
@@ -35,6 +37,9 @@ class SessionBus:
     def subscribe(self, request_id: str) -> asyncio.Queue:
         """Регистрирует очередь для запроса и сразу отдаёт в неё события,
         буферизованные до подключения (Этап 7.3) — если они не истекли."""
+        if request_id in self._queues:
+            raise SessionAlreadySubscribedError(request_id)
+
         queue: asyncio.Queue = asyncio.Queue()
         self._queues[request_id] = queue
 

@@ -3,6 +3,7 @@ Redis; доступность MCP Tools Server не является жёстк�
 """
 
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from app.api.v1.endpoints import health as health_module
 from app.clients.http_client import external_api_http_client
 from app.core.settings import get_settings
 from app.main import app, lifespan, session_bus
+from tests.fixtures.stream_ticket import create_stream_ticket
 
 pytestmark = pytest.mark.integration
 
@@ -102,9 +104,17 @@ async def test_sse_endpoint_is_mounted_and_accepts_connection():
     при отладке этого теста)."""
     async with lifespan(app):
         await session_bus.publish('smoke-test-session', {'type': 'done'})
+        ticket = create_stream_ticket(
+            api_key=get_settings().app.api_key.get_secret_value(),
+            request_id='smoke-test-session',
+            expires_at=int(time.time()) + 60,
+        )
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:
-            async with client.stream('GET', '/sse/smoke-test-session') as response:
+            async with client.stream(
+                'GET',
+                f'/sse/smoke-test-session?ticket={ticket}',
+            ) as response:
                 assert response.status_code == 200
                 assert response.headers['content-type'].startswith('text/event-stream')
                 lines = [line async for line in response.aiter_lines() if line.startswith('data: ')]

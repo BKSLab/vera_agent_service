@@ -34,6 +34,7 @@ from app.messaging.consumer import STALE_TURN_MESSAGE, AgentRequestConsumer
 from app.observability.tracing import configure_tracing, shutdown_tracing
 from app.streaming.session_bus import SessionBus
 from app.streaming.sse import create_sse_router
+from app.streaming.ticket import StreamTicketVerifier
 
 STARTUP_TIMEOUT_SECONDS: float = 10.0
 """Ограничивает время ожидания подключения к RabbitMQ/Redis при старте —
@@ -148,7 +149,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
 app.mount('/static', StaticFiles(directory=Path(__file__).parent / 'static'), name='static')
 create_admin(app=app, engine=engine)
-app.include_router(create_sse_router(session_bus))
+app.include_router(
+    create_sse_router(
+        session_bus,
+        StreamTicketVerifier(get_settings().app.api_key.get_secret_value()),
+    )
+)
 app.include_router(chat_history_router, prefix='/api/v1')
 app.include_router(message_feedback_router, prefix='/api/v1')
 app.include_router(session_feedback_router, prefix='/api/v1')

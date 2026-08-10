@@ -1,3 +1,8 @@
+import asyncio
+
+import pytest
+
+from app.exceptions.streaming import SessionAlreadySubscribedError
 from app.streaming.session_bus import SessionBus
 
 
@@ -63,29 +68,37 @@ async def test_expired_unsubscribed_request_buffer_is_pruned_on_next_publish(mon
     assert 'request-new' in bus._buffers
 
 
-async def test_resubscribe_replaces_previous_queue():
-    """Одно активное соединение на request_id (раздел 0.1) — вторая
-    подписка (например вторая вкладка) замещает первую."""
+async def test_resubscribe_rejects_second_subscriber_and_keeps_first():
     bus = SessionBus()
     first_queue = bus.subscribe('s1')
-    second_queue = bus.subscribe('s1')
+
+    with pytest.raises(SessionAlreadySubscribedError):
+        bus.subscribe('s1')
 
     await bus.publish('s1', {'type': 'token', 'content': 'X'})
 
-    assert second_queue.get_nowait() == {'type': 'token', 'content': 'X'}
-    assert first_queue.empty()
+    assert first_queue.get_nowait() == {'type': 'token', 'content': 'X'}
 
 
-async def test_unsubscribe_is_noop_if_queue_was_already_replaced():
+async def test_unsubscribe_is_noop_for_foreign_queue():
     bus = SessionBus()
     first_queue = bus.subscribe('s1')
-    second_queue = bus.subscribe('s1')
+    foreign_queue = asyncio.Queue()
 
+    bus.unsubscribe('s1', foreign_queue)
+
+    await bus.publish('s1', {'type': 'token', 'content': 'жива'})
+    assert first_queue.get_nowait() == {'type': 'token', 'content': 'жива'}
+
+
+async def test_unsubscribe_releases_slot_for_next_subscriber():
+    bus = SessionBus()
+    first_queue = bus.subscribe('s1')
     bus.unsubscribe('s1', first_queue)
 
-    # Вторая (текущая) подписка всё ещё активна и получает публикации.
-    await bus.publish('s1', {'type': 'token', 'content': 'жива'})
-    assert second_queue.get_nowait() == {'type': 'token', 'content': 'жива'}
+    second_queue = bus.subscribe('s1')
+
+    assert second_queue is not first_queue
 
 
 async def test_different_request_ids_do_not_share_queues():
