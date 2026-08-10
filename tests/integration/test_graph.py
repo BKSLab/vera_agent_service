@@ -406,7 +406,11 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
                 # сообщении пользователя (VERA-021).
                 return _tool_call_completion(
                     'send_consultation_email',
-                    {'consultation_text': consultation_text, 'email': email},
+                    {
+                        'consultation_text': consultation_text,
+                        'consultation_topic': 'Трудовые права',
+                        'email': email,
+                    },
                 )
             last_user_message = [m for m in payload['messages'] if m['role'] == 'user'][-1]['content']
             if email in last_user_message:
@@ -435,7 +439,13 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
         }
         turn2 = await graph.ainvoke(turn2_state)
 
-        assert requests == [{'consultation_text': consultation_text, 'email': email}]
+        assert requests == [
+            {
+                'consultation_text': consultation_text,
+                'consultation_topic': 'Трудовые права',
+                'email': email,
+            }
+        ]
         assert turn2['tool_calls'] == ['send_consultation_email']
         assert turn2['messages'][-1].content.startswith(f'Документ отправлен на {email}.')
 
@@ -466,7 +476,11 @@ async def test_automatic_email_spans_redact_consultation_and_recipient():
             if not payload.get('stream'):
                 return _tool_call_completion(
                     'send_consultation_email',
-                    {'consultation_text': consultation_text, 'email': recipient},
+                    {
+                        'consultation_text': consultation_text,
+                        'consultation_topic': 'Трудовые права',
+                        'email': recipient,
+                    },
                 )
             last_user_message = [m for m in payload['messages'] if m['role'] == 'user'][-1]['content']
             if recipient in last_user_message:
@@ -495,6 +509,7 @@ async def test_automatic_email_spans_redact_consultation_and_recipient():
     assert requests == [
         {
             'consultation_text': consultation_text,
+            'consultation_topic': 'Трудовые права',
             'email': recipient,
         }
     ]

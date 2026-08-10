@@ -139,17 +139,57 @@ async def test_consultation_email_proxy_resolves_remote_tool_once_and_preserves_
     assert proxy.name == 'send_consultation_email'
 
     await proxy.ainvoke(
-        {'consultation_text': 'Первая консультация', 'email': 'one@example.com'}
+        {
+            'consultation_text': 'Первая консультация',
+            'email': 'one@example.com',
+        }
     )
     await proxy.ainvoke(
-        {'consultation_text': 'Вторая консультация', 'email': 'two@example.com'}
+        {
+            'consultation_text': 'Вторая консультация',
+            'email': 'two@example.com',
+            'consultation_topic': 'Трудовые права',
+        }
     )
 
     assert client.call_count == 1
     assert remote_tool.call_count == 2
     assert remote_tool.received_arguments == [
-        {'consultation_text': 'Первая консультация', 'email': 'one@example.com'},
-        {'consultation_text': 'Вторая консультация', 'email': 'two@example.com'},
+        {
+            'consultation_text': 'Первая консультация',
+            'consultation_topic': 'Консультация',
+            'email': 'one@example.com',
+        },
+        {
+            'consultation_text': 'Вторая консультация',
+            'consultation_topic': 'Трудовые права',
+            'email': 'two@example.com',
+        },
+    ]
+
+
+async def test_consultation_email_proxy_replaces_blank_topic_with_default():
+    remote_tool = _FakeTool(
+        name='send_consultation_email',
+        results=[{'status': 'ok', 'email': 'user@example.com'}],
+    )
+    client = _FakeClient(tools=[remote_tool])
+    proxy = build_consultation_email_tool_proxy(client)
+
+    await proxy.ainvoke(
+        {
+            'consultation_text': 'Консультация',
+            'email': 'user@example.com',
+            'consultation_topic': '   ',
+        }
+    )
+
+    assert remote_tool.received_arguments == [
+        {
+            'consultation_text': 'Консультация',
+            'consultation_topic': 'Консультация',
+            'email': 'user@example.com',
+        }
     ]
 
 

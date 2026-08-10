@@ -34,6 +34,16 @@ SEND_CONSULTATION_EMAIL_TOOL_NAME = 'send_consultation_email'
 """Мутирующий инструмент формирования PDF и отправки консультации."""
 
 
+DEFAULT_CONSULTATION_TOPIC = 'Консультация'
+"""Тема по умолчанию для старых или неполных tool-call аргументов.
+
+Текущий MCP-контракт требует ``consultation_topic``. До его добавления в
+контракт Agent модель могла прислать только текст и email, поэтому прокси
+остаётся обратно совместимым и всё равно отправляет полный набор аргументов
+на MCP.
+"""
+
+
 IDEMPOTENCY_KEY_HEADER = 'X-Idempotency-Key'
 """Ключ, по которому MCP Tools Server может отбросить повторную отправку.
 
@@ -328,12 +338,15 @@ def build_consultation_email_tool_proxy(
     async def send_consultation_email(
         consultation_text: str,
         email: str,
+        consultation_topic: str = DEFAULT_CONSULTATION_TOPIC,
     ) -> dict:
         """Сформировать доступный PDF из полного итогового текста консультации
         и отправить его на явно подтверждённый пользователем email.
 
-        Вызывай только после явной просьбы пользователя. Не форматируй текст:
-        MCP-инструмент сам выделит заголовки, абзацы и списки.
+        Вызывай только после явной просьбы пользователя. Передай краткую тему
+        консультации на русском языке; если тема не выделена отдельно, оставь
+        значение по умолчанию «Консультация». Не форматируй текст: MCP-инструмент
+        сам выделит заголовки, абзацы и списки.
         """
         if not resolved_tool:
             tools = await client.get_tools()
@@ -347,6 +360,9 @@ def build_consultation_email_tool_proxy(
         return await resolved_tool[0].ainvoke(
             {
                 'consultation_text': consultation_text,
+                'consultation_topic': (
+                    consultation_topic.strip() or DEFAULT_CONSULTATION_TOPIC
+                ),
                 'email': email,
             }
         )

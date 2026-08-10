@@ -110,6 +110,7 @@ async def test_call_consultation_email_once_against_real_mock_server():
         tools_by_name = {tool.name: tool for tool in tools}
         arguments = {
             'consultation_text': 'Полный текст консультации',
+            'consultation_topic': 'Трудовые права',
             'email': 'user@example.com',
         }
 

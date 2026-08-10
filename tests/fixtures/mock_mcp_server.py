@@ -65,6 +65,7 @@ def create_mock_mcp_app(
     @mcp.tool()
     async def send_consultation_email(
         consultation_text: str,
+        consultation_topic: str,
         email: str,
     ) -> dict:
         """Формирование PDF и отправка консультации по email (мок)."""
@@ -72,6 +73,7 @@ def create_mock_mcp_app(
             consultation_requests.append(
                 {
                     'consultation_text': consultation_text,
+                    'consultation_topic': consultation_topic,
                     'email': email,
                 }
             )
