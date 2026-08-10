@@ -12,7 +12,7 @@ from app.graph.prompts.context import (
     SEARCH_UNAVAILABLE_INSTRUCTION,
     format_chunks_instruction,
 )
-from app.graph.prompts.system import FINAL_RESPONSE_SYSTEM_PROMPT
+from app.graph.prompts.system import SYSTEM_PROMPT
 from app.graph.state import AgentState
 
 
@@ -55,7 +55,7 @@ def create_generate_with_context_node(
             older_turns_summary_max_chars=context_settings.context_older_turns_summary_max_chars,
         )
         messages = [
-            SystemMessage(content=FINAL_RESPONSE_SYSTEM_PROMPT),
+            SystemMessage(content=SYSTEM_PROMPT),
             *bounded_history,
             SystemMessage(content=instruction),
         ]

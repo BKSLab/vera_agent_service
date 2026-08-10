@@ -109,29 +109,3 @@ SYSTEM_PROMPT_PARTS = (
 )
 
 SYSTEM_PROMPT = '\n\n'.join(SYSTEM_PROMPT_PARTS)
-
-FINAL_RESPONSE_CONTROL_PROMPT = (
-    'Финальный ответ. Инструменты для этого запроса уже обработаны программой. '
-    'Не вызывай инструменты и не имитируй их вызов текстом: не выводи имена '
-    'инструментов, JSON аргументов, префиксы call: или служебный протокол. '
-    'Верни пользователю только обычный понятный текстовый ответ по результату '
-    'обработки запроса.'
-)
-
-FINAL_RESPONSE_SYSTEM_PROMPT_PARTS = (
-    VERA_DESCRIPTION_PROMPT,
-    VERA_ROLE_PROMPT,
-    SOURCES_PROMPT,
-    UNAUTHENTICATED_USER_PROMPT,
-    STYLE_PROMPT,
-    RESPONSE_FORMAT_PROMPT,
-    FINAL_RESPONSE_CONTROL_PROMPT,
-)
-"""Инструкции для узлов, которые уже получили результат инструмента.
-
-`SYSTEM_PROMPT` нужен маршрутизатору и содержит правила выбора инструментов.
-Финальный генератор не должен получать эти правила: модель без схемы tools
-может воспроизвести их как текстовый псевдовызов (VERA-021).
-"""
-
-FINAL_RESPONSE_SYSTEM_PROMPT = '\n\n'.join(FINAL_RESPONSE_SYSTEM_PROMPT_PARTS)

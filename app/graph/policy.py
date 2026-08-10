@@ -15,41 +15,6 @@ CONFIRMATION_REQUEST_MARKER = '?'
 Не заменяет собой полноценный confirmation token (см. карточку VERA-021,
 "вне скоупа") — минимальное проверяемое условие для этого прогона."""
 
-CONSULTATION_EMAIL_GUARD_NOTICE = (
-    'Отправка консультации по email сейчас не может быть выполнена '
-    'автоматически: серверная проверка не смогла подтвердить готовность '
-    'отправки по сохранённой истории диалога. Не пиши, что уже отправляешь '
-    'или запускаешь отправку, и не описывай и не изображай текстом вызов '
-    'какого-либо инструмента — просто вежливо попроси пользователя ещё раз '
-    'явно подтвердить отправку и адрес получателя обычным текстом.'
-)
-"""Инструкция для `generate_direct`, когда `analyze_intent` отклонил
-tool_call модели (VERA-021, регрессия исправлена): без неё модель, не зная
-о блокировке, может воспроизвести текстовый псевдовызов инструмента вместо
-обычного ответа — именно это и происходило до фикса."""
-
-CONSULTATION_EMAIL_BLOCKED_RESPONSE = (
-    'Подтвердите, пожалуйста, адрес электронной почты и отправку консультации?'
-)
-"""Детерминированный ответ при отклонённом mutating tool-call.
-
-В этой ветке модель не вызывается: prompt-инструкция сама по себе не является
-контролем побочного эффекта и может быть проигнорирована моделью (VERA-021).
-"""
-
-PSEUDO_TOOL_CALL_MARKERS = (
-    'call:default_api:',
-    'send_consultation_email{',
-    'send_consultation_email(',
-)
-
-
-def contains_pseudo_tool_call(text: str) -> bool:
-    """Распознаёт служебный синтаксис инструмента, утёкший в обычный текст."""
-    normalized = text.lower().replace(' ', '')
-    return any(marker in normalized for marker in PSEUDO_TOOL_CALL_MARKERS)
-
-
 _FACTUAL_LEGAL_KEYWORDS = (
     'закон',
     'кодекс',
@@ -106,20 +71,8 @@ def find_last_human_message(messages: list[BaseMessage]) -> HumanMessage | None:
 def consultation_email_send_is_confirmed(messages: list[BaseMessage], email: str) -> bool:
     """Проверяет по сохранённой истории два факта из карточки VERA-021,
     вместо того чтобы доверять только намерению, распознанному моделью:
-    ответ ассистента прямо перед текущей репликой пользователя запрашивал
-    подтверждение, и адрес получателя реально фигурировал в одном из
-    сообщений пользователя этой сессии — не только в последнем.
-
-    Требование "email именно в последнем сообщении" на практике отвергало
-    естественный сценарий "адрес назвали раньше -> ассистент переспросил
-    -> пользователь коротко подтвердил, не повторяя адрес" — код при этом
-    отбрасывал реальный tool_call модели молча, а следующий (нетулованный)
-    вызов генерации, не зная о блокировке, вместо обычного ответа
-    воспроизводил текстовый псевдовызов инструмента. Проверка по всей
-    истории сообщений пользователя сохраняет исходную цель (адрес не
-    выдуман моделью, а реально введён человеком, и отправке предшествовало
-    явное подтверждение), но не требует дословного повтора в последней
-    реплике.
+    адрес получателя присутствует в тексте сообщения пользователя текущего
+    turn'а, и предыдущий ответ ассистента запрашивал подтверждение.
 
     Возвращает `False`, если в истории нет ни одного сообщения пользователя
     или ни одного предшествующего ответа ассистента — первая реплика
@@ -136,25 +89,18 @@ def consultation_email_send_is_confirmed(messages: list[BaseMessage], email: str
     if last_human_position is None:
         return False
 
+    last_human = messages[last_human_position]
+    if not isinstance(last_human.content, str) or email.lower() not in last_human.content.lower():
+        return False
+
     previous_ai = next(
         (
             message
             for message in reversed(messages[:last_human_position])
             if isinstance(message, AIMessage)
-            and isinstance(message.content, str)
-            and message.content.strip()
         ),
         None,
     )
     if previous_ai is None or not isinstance(previous_ai.content, str):
         return False
-    if CONFIRMATION_REQUEST_MARKER not in previous_ai.content:
-        return False
-
-    email_lower = email.lower()
-    return any(
-        isinstance(message, HumanMessage)
-        and isinstance(message.content, str)
-        and email_lower in message.content.lower()
-        for message in messages
-    )
+    return CONFIRMATION_REQUEST_MARKER in previous_ai.content

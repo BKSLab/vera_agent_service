@@ -9,7 +9,7 @@ from os import getpid
 from socket import gethostname
 
 import aio_pika
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
 from opentelemetry.trace import Span, Status, StatusCode
@@ -27,7 +27,6 @@ from app.exceptions.chat_turn import (
     ChatTurnSessionMismatchError,
 )
 from app.exceptions.messaging import InvalidAgentRequestError
-from app.graph.policy import contains_pseudo_tool_call
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -190,7 +189,6 @@ def _initial_state(payload: AgentRequestMessage) -> dict:
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
-        'consultation_email_guard_notice': None,
     }
 
 
@@ -827,8 +825,6 @@ class AgentRequestConsumer:
         persistence_data: TurnPersistenceData,
     ) -> AsyncIterator[str]:
         config = {'configurable': {'thread_id': payload.session_id}}
-        streamed_content = False
-        deferred_answer: str | None = None
         async for event in self._graph.astream_events(_initial_state(payload), config=config, version='v2'):
             # Node-level outputs повторяют `tool_calls`/`retrieved_chunks`.
             # Единственный authoritative snapshot — корневой graph output.
@@ -847,27 +843,13 @@ class AgentRequestConsumer:
                                 if isinstance(tool_name, str)
                             )
                         )
-                    if not streamed_content:
-                        messages = output.get('messages')
-                        if isinstance(messages, list):
-                            for message in reversed(messages):
-                                if isinstance(message, AIMessage) and isinstance(message.content, str):
-                                    if message.content and not contains_pseudo_tool_call(message.content):
-                                        deferred_answer = message.content
-                                    break
             if event.get('event') != 'on_chat_model_stream':
                 continue
             if event.get('metadata', {}).get('langgraph_node') not in FINAL_RESPONSE_NODES:
                 continue
             content = event['data']['chunk'].content
             if content:
-                if contains_pseudo_tool_call(content):
-                    logger.error('Заблокирован псевдовызов инструмента в SSE-потоке')
-                    continue
-                streamed_content = True
                 yield content
-        if not streamed_content and deferred_answer:
-            yield deferred_answer
 
 
 def _parse_payload(body: bytes) -> AgentRequestMessage:

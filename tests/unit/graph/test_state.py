@@ -17,7 +17,6 @@ def test_agent_state_has_expected_keys():
         'retrieved_chunks',
         'tool_calls',
         'search_unavailable',
-        'consultation_email_guard_notice',
     }
 
 
