@@ -20,7 +20,12 @@ def create_generate_direct_node(
     `create_generate_with_context_node` про механизм стриминга наружу.
 
     Модели передаётся ограниченное по бюджету представление истории
-    (`context_settings`, VERA-020), не вся `state['messages']`."""
+    (`context_settings`, VERA-020), не вся `state['messages']`.
+
+    Если код отклонил предложенный моделью mutating tool_call
+    (`consultation_email_guard_notice`, VERA-021), добавляет одноразовую
+    инструкцию для этого конкретного вызова — не в `state['messages']`,
+    чтобы не засорять постоянную историю служебным сообщением."""
 
     async def generate_direct(state: AgentState) -> dict:
         bounded_history = build_bounded_messages(
@@ -29,6 +34,9 @@ def create_generate_direct_node(
             older_turns_summary_max_chars=context_settings.context_older_turns_summary_max_chars,
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), *bounded_history]
+        guard_notice = state.get('consultation_email_guard_notice')
+        if guard_notice:
+            messages.append(SystemMessage(content=guard_notice))
 
         full_text = ''
         async for token in astream_tokens(chat_model, messages):

@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 
 from app.core.settings import GraphContextSettings
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
+from app.graph.policy import CONSULTATION_EMAIL_GUARD_NOTICE
 from app.observability.request_trace import (
     AgentRequestTraceData,
     reset_request_trace,
@@ -36,6 +37,7 @@ def _state_with_messages(messages: list[BaseMessage]):
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
+        'consultation_email_guard_notice': None,
     }
 
 
@@ -154,13 +156,17 @@ async def test_consultation_email_tool_call_is_dropped_without_prior_confirmatio
     finally:
         reset_request_trace(token)
 
-    assert result == {}
+    assert result == {'consultation_email_guard_notice': CONSULTATION_EMAIL_GUARD_NOTICE}
     assert trace_data.route == 'direct'
 
 
-async def test_consultation_email_tool_call_is_dropped_when_email_missing_from_current_message():
-    """Предыдущий ответ запросил подтверждение, но в текущем сообщении
-    пользователя нет самого адреса — тул всё равно не вызывается."""
+async def test_consultation_email_tool_call_is_dropped_when_email_never_typed_by_user():
+    """Предыдущий ответ запросил подтверждение, но адрес, который
+    предлагает отправить модель, пользователь не вводил ни разу за всю
+    сессию — тул не вызывается, а модель получает guard notice, чтобы не
+    изобразить текстом уже "отправленный" вызов инструмента (регрессия,
+    из-за которой в проде утёк текстовый псевдовызов `call:default_api:
+    send_consultation_email{...}`)."""
     arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
     chat_model = chat_model_with_handler(
         lambda request: _tool_call_response('send_consultation_email', arguments),
@@ -180,7 +186,7 @@ async def test_consultation_email_tool_call_is_dropped_when_email_missing_from_c
     finally:
         reset_request_trace(token)
 
-    assert result == {}
+    assert result == {'consultation_email_guard_notice': CONSULTATION_EMAIL_GUARD_NOTICE}
     assert trace_data.route == 'direct'
 
 
@@ -211,6 +217,38 @@ async def test_consultation_email_tool_call_is_allowed_after_explicit_confirmati
     assert ai_message.tool_calls[0]['args'] == arguments
     assert trace_data.route == 'consultation_email'
     assert trace_data.search_required is False
+
+
+async def test_consultation_email_tool_call_is_allowed_when_address_was_given_in_earlier_turn():
+    """Реальный сценарий из бага: пользователь назвал email в одном из
+    более ранних сообщений (не в последнем), затем ассистент переспросил
+    подтверждение, а пользователь коротко согласился, не повторяя адрес —
+    отправка должна пройти, а не блокироваться (VERA-021, фикс)."""
+    arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response('send_consultation_email', arguments),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
+    history = [
+        HumanMessage(content='Меня уволили, помоги разобраться. Мой email user@example.com'),
+        AIMessage(content='Вот разбор ситуации по существу.'),
+        HumanMessage(content='Отправишь мне на почту?'),
+        AIMessage(content='Подтвердите, пожалуйста, отправку консультации?'),
+        HumanMessage(content='Да, отправляй'),
+    ]
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state_with_messages(history))
+    finally:
+        reset_request_trace(token)
+
+    ai_message = result['messages'][0]
+    assert ai_message.tool_calls[0]['name'] == 'send_consultation_email'
+    assert ai_message.tool_calls[0]['args'] == arguments
+    assert trace_data.route == 'consultation_email'
 
 
 async def test_factual_question_without_tool_call_is_forced_into_kb_search():

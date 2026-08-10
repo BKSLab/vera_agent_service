@@ -33,6 +33,7 @@ def _initial_state(text: str) -> dict:
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
+        'consultation_email_guard_notice': None,
     }
 
 
@@ -261,6 +262,7 @@ async def test_context_budget_trims_old_turns_without_losing_current_answer():
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
+            'consultation_email_guard_notice': None,
         }
 
         result = await graph.ainvoke(state)
@@ -427,6 +429,7 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
+            'consultation_email_guard_notice': None,
         }
         turn2 = await graph.ainvoke(turn2_state)
 
@@ -481,6 +484,7 @@ async def test_automatic_email_spans_redact_consultation_and_recipient():
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
+            'consultation_email_guard_notice': None,
         }
         await graph.ainvoke(turn2_state)
 

@@ -189,6 +189,7 @@ def _initial_state(payload: AgentRequestMessage) -> dict:
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
+        'consultation_email_guard_notice': None,
     }
 
 

@@ -13,6 +13,7 @@ from app.clients.mcp_client import (
 from app.core.settings import GraphContextSettings
 from app.graph.context_budget import build_bounded_messages
 from app.graph.policy import (
+    CONSULTATION_EMAIL_GUARD_NOTICE,
     consultation_email_send_is_confirmed,
     find_last_human_message,
     is_probably_factual_or_legal_question,
@@ -76,12 +77,14 @@ def create_analyze_intent_node(
             ):
                 # Мутирующая отправка не выполняется по одному лишь
                 # намерению модели (VERA-021): без кодового подтверждения по
-                # истории реплика уходит как обычный текстовый ответ —
-                # SYSTEM_PROMPT (CONSULTATION_EMAIL_PROMPT) уже инструктирует
-                # модель запросить или подтвердить адрес в этом случае.
+                # истории реплика уходит как обычный текстовый ответ. Модель
+                # не знает, что её tool_call отклонён кодом, и без явной
+                # инструкции может воспроизвести текстовый псевдовызов
+                # инструмента в generate_direct вместо обычного ответа —
+                # guard notice в состоянии это предотвращает.
                 if trace_data is not None:
                     trace_data.route = 'direct'
-                return {}
+                return {'consultation_email_guard_notice': CONSULTATION_EMAIL_GUARD_NOTICE}
             if trace_data is not None:
                 if tool_call['name'] == SEND_CONSULTATION_EMAIL_TOOL_NAME:
                     trace_data.route = 'consultation_email'
