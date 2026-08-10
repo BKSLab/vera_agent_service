@@ -222,7 +222,12 @@ async def test_empty_stream_is_content_error_not_done():
     ]
     service.complete_turn.assert_not_awaited()
     assert service.fail_turn.await_args.kwargs['status'] == STATUS_GENERATION_FAILED
-    assert message.nacked_requeue is False
+    # Пустой ответ уже получил локальные retries в `astream_tokens`; повтор
+    # всего графа и повторная доставка через DLQ только заново запускают тот
+    # же плохой LLM-ответ. Клиент получает терминальную ошибку, сообщение
+    # подтверждается, а пользователь может повторить запрос новой репликой.
+    assert message.ack_count == 1
+    assert message.nacked_requeue is None
     assert message.settlements == 1
 
 

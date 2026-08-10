@@ -2,6 +2,8 @@ from app.graph.prompts.description import VERA_DESCRIPTION_PROMPT
 from app.graph.prompts.role import VERA_ROLE_PROMPT
 from app.graph.prompts.system import (
     CONSULTATION_EMAIL_PROMPT,
+    FINAL_RESPONSE_SYSTEM_PROMPT,
+    FINAL_RESPONSE_SYSTEM_PROMPT_PARTS,
     SOURCES_PROMPT,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_PARTS,
@@ -126,3 +128,15 @@ def test_prompt_is_assembled_from_explicit_parts_without_internal_line_wrapping(
     assert SYSTEM_PROMPT == '\n\n'.join(SYSTEM_PROMPT_PARTS)
 
     assert all('\n' not in part for part in SYSTEM_PROMPT_PARTS)
+
+
+def test_final_response_prompt_does_not_include_tool_selection_instructions():
+    lowered = FINAL_RESPONSE_SYSTEM_PROMPT.lower()
+
+    assert FINAL_RESPONSE_SYSTEM_PROMPT == '\n\n'.join(FINAL_RESPONSE_SYSTEM_PROMPT_PARTS)
+    assert TOOL_USAGE_PROMPT not in FINAL_RESPONSE_SYSTEM_PROMPT
+    assert CONSULTATION_EMAIL_PROMPT not in FINAL_RESPONSE_SYSTEM_PROMPT
+    assert 'vera_rag_kb' not in lowered
+    assert 'send_consultation_email' not in lowered
+    assert 'не вызывай инструменты' in lowered
+    assert 'не имитируй их вызов текстом' in lowered

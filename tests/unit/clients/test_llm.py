@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_openai import ChatOpenAI
 
 from app.clients.llm import ainvoke_with_retry, astream_tokens
-from app.exceptions.llm import LlmApiRequestError
+from app.exceptions.llm import EmptyLlmStreamError, LlmApiRequestError
 
 
 def _chat_model(handler) -> ChatOpenAI:
@@ -182,3 +182,66 @@ async def test_astream_tokens_does_not_retry_after_first_chunk_was_yielded():
 
     assert collected == ['первый-чанк']
     assert fake_model.call_count == 1
+
+
+class _FakeTechnicalFirstChunkModel:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def astream(self, messages) -> AsyncIterator[AIMessageChunk]:
+        self.call_count += 1
+        yield AIMessageChunk(content='')
+        yield AIMessageChunk(content='Видимый ответ')
+
+
+async def test_astream_tokens_ignores_role_only_chunk_before_text():
+    fake_model = _FakeTechnicalFirstChunkModel()
+
+    collected = [chunk async for chunk in astream_tokens(fake_model, [HumanMessage(content='hi')])]
+
+    assert collected == ['Видимый ответ']
+    assert fake_model.call_count == 1
+
+
+class _FakeContentBlocksModel:
+    async def astream(self, messages) -> AsyncIterator[AIMessageChunk]:
+        yield AIMessageChunk(
+            content=[
+                {'type': 'reasoning', 'text': 'служебное рассуждение'},
+                {'type': 'text', 'text': 'Видимый ответ'},
+            ]
+        )
+
+
+async def test_astream_tokens_emits_only_text_content_blocks():
+    collected = [
+        chunk
+        async for chunk in astream_tokens(
+            _FakeContentBlocksModel(), [HumanMessage(content='hi')]
+        )
+    ]
+
+    assert collected == ['Видимый ответ']
+
+
+class _FakeAlwaysEmptyModel:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def astream(self, messages) -> AsyncIterator[AIMessageChunk]:
+        self.call_count += 1
+        yield AIMessageChunk(content='')
+
+
+async def test_astream_tokens_raises_content_error_after_empty_retries():
+    fake_model = _FakeAlwaysEmptyModel()
+
+    with pytest.raises(EmptyLlmStreamError):
+        async for _ in astream_tokens(
+            fake_model,
+            [HumanMessage(content='hi')],
+            retries=2,
+        ):
+            pass
+
+    assert fake_model.call_count == 2

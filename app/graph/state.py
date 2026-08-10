@@ -1,4 +1,4 @@
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -41,3 +41,7 @@ class AgentState(TypedDict):
     для этих двух случаев — см. AGENT_SERVICE_PLAN.md, раздел 0.1. Каждый
     новый вызов графа должен явно передавать `False` — поле не участвует в
     накоплении между репликами (в отличие от `messages`)."""
+
+    consultation_email_guard_notice: NotRequired[str | None]
+    """Детерминированная просьба уточнить email после отклонённого
+    неподтверждённого mutating tool-call."""

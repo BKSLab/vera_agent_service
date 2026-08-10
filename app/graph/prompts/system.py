@@ -109,3 +109,43 @@ SYSTEM_PROMPT_PARTS = (
 )
 
 SYSTEM_PROMPT = '\n\n'.join(SYSTEM_PROMPT_PARTS)
+
+FINAL_RESPONSE_CONTROL_PROMPT = (
+    'Финальный ответ. Инструменты для этого запроса уже обработаны программой. '
+    'Не вызывай инструменты и не имитируй их вызов текстом: не выводи имена '
+    'инструментов, JSON-аргументы, префиксы «call:» или служебный протокол. '
+    'Верни пользователю только обычный понятный текстовый ответ по результату '
+    'обработки запроса.'
+)
+
+FINAL_SOURCES_PROMPT = SOURCES_PROMPT.replace(
+    'vera_rag_kb',
+    'поиска по базе знаний',
+)
+"""Правила достоверности для финального генератора без имён tools.
+
+Финальный узел получает уже подготовленный контекст; явные имена MCP-тулов в
+его prompt только повышают риск воспроизведения псевдовызова обычным текстом.
+"""
+
+FINAL_UNAUTHENTICATED_USER_PROMPT = UNAUTHENTICATED_USER_PROMPT.replace(
+    'vera_rag_kb',
+    'поиска по базе знаний',
+).replace(
+    'send_consultation_email',
+    'отправки консультации по email',
+)
+
+FINAL_RESPONSE_SYSTEM_PROMPT_PARTS = (
+    VERA_DESCRIPTION_PROMPT,
+    VERA_ROLE_PROMPT,
+    FINAL_SOURCES_PROMPT,
+    FINAL_UNAUTHENTICATED_USER_PROMPT,
+    STYLE_PROMPT,
+    RESPONSE_FORMAT_PROMPT,
+    FINAL_RESPONSE_CONTROL_PROMPT,
+)
+"""Финальный генератор не получает правила выбора tools: без привязанной
+схемы модель может воспроизвести их как текстовый псевдовызов."""
+
+FINAL_RESPONSE_SYSTEM_PROMPT = '\n\n'.join(FINAL_RESPONSE_SYSTEM_PROMPT_PARTS)

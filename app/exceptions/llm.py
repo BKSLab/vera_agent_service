@@ -13,3 +13,10 @@ class LlmApiRequestError(Exception):
 
     def __str__(self) -> str:
         return f'Ошибка запроса к LLM API. Подробности: {self.error_details}'
+
+
+class EmptyLlmStreamError(RuntimeError):
+    """LLM завершила стрим без видимого текстового ответа."""
+
+    def __init__(self) -> None:
+        super().__init__('LLM не вернула ни одного токена ответа')

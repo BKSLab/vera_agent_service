@@ -9,7 +9,7 @@ from os import getpid
 from socket import gethostname
 
 import aio_pika
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
 from opentelemetry.trace import Span, Status, StatusCode
@@ -26,7 +26,9 @@ from app.exceptions.chat_turn import (
     ChatPersistenceServiceError,
     ChatTurnSessionMismatchError,
 )
+from app.exceptions.llm import EmptyLlmStreamError
 from app.exceptions.messaging import InvalidAgentRequestError
+from app.graph.policy import contains_pseudo_tool_call
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -97,18 +99,6 @@ PersistenceServiceFactory = Callable[
     [],
     AbstractAsyncContextManager[ChatPersistenceService],
 ]
-
-
-class EmptyLlmStreamError(RuntimeError):
-    """Модель не отдала ни одного токена.
-
-    Отсутствие содержимого — ошибка ответа, а не успех: сохранённый пустой
-    `completed` и отправленный `done` выглядели бы для пользователя как
-    полученная консультация (VERA-018).
-    """
-
-    def __init__(self) -> None:
-        super().__init__('LLM не вернула ни одного токена ответа')
 
 
 @dataclass
@@ -189,6 +179,7 @@ def _initial_state(payload: AgentRequestMessage) -> dict:
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
+        'consultation_email_guard_notice': None,
     }
 
 
@@ -544,6 +535,28 @@ class AgentRequestConsumer:
                 last_error = error
                 partial_answer = ''.join(response_chunks) or None
 
+                if isinstance(error, EmptyLlmStreamError) and not trace_data.mutating_tool_called:
+                    # ``astream_tokens`` уже сделал bounded retries самой
+                    # финальной LLM-операции. Повтор всего графа здесь только
+                    # добавлял бы пустые AIMessage в checkpoint и повторял бы
+                    # поиск/маршрутизацию без пользы.
+                    logger.error(
+                        '❌ LLM завершила финальный поток без видимого текста '
+                        '(session_id=%s, request_id=%s)',
+                        payload.session_id,
+                        payload.request_id,
+                    )
+                    await self._finish_with_error(
+                        delivery=delivery,
+                        span=span,
+                        trace_data=trace_data,
+                        error=error,
+                        status=STATUS_GENERATION_FAILED,
+                        detail=GENERATION_FAILED_MESSAGE,
+                        answer=None,
+                    )
+                    return
+
                 if trace_data.mutating_tool_called:
                     logger.error(
                         '❌ Ошибка после начала мутирующего MCP-вызова; повтор графа запрещён '
@@ -825,6 +838,8 @@ class AgentRequestConsumer:
         persistence_data: TurnPersistenceData,
     ) -> AsyncIterator[str]:
         config = {'configurable': {'thread_id': payload.session_id}}
+        streamed_content = False
+        deferred_answer: str | None = None
         async for event in self._graph.astream_events(_initial_state(payload), config=config, version='v2'):
             # Node-level outputs повторяют `tool_calls`/`retrieved_chunks`.
             # Единственный authoritative snapshot — корневой graph output.
@@ -843,13 +858,45 @@ class AgentRequestConsumer:
                                 if isinstance(tool_name, str)
                             )
                         )
+                    # Guard-ответ и детерминированный результат email-тулы
+                    # формируются AIMessage без model-stream события. Не
+                    # считать их пустым ответом: отложим безопасный текст до
+                    # завершения графа и отправим его как один SSE-token.
+                    if not streamed_content:
+                        messages = output.get('messages')
+                        if isinstance(messages, list):
+                            for message in reversed(messages):
+                                # Ищем AIMessage только после текущей
+                                # HumanMessage. Иначе при аварии финального
+                                # узла можно случайно повторно отправить старый
+                                # ответ из истории как ответ на новый запрос.
+                                if isinstance(message, HumanMessage):
+                                    break
+                                if not isinstance(message, AIMessage):
+                                    continue
+                                content = message.content
+                                if isinstance(content, str) and content:
+                                    if contains_pseudo_tool_call(content):
+                                        logger.error(
+                                            'Заблокирован псевдовызов инструмента в финальном сообщении'
+                                        )
+                                    else:
+                                        deferred_answer = content
+                                break
             if event.get('event') != 'on_chat_model_stream':
                 continue
             if event.get('metadata', {}).get('langgraph_node') not in FINAL_RESPONSE_NODES:
                 continue
             content = event['data']['chunk'].content
-            if content:
-                yield content
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if contains_pseudo_tool_call(content):
+                logger.error('Заблокирован псевдовызов инструмента в SSE-потоке')
+                continue
+            streamed_content = True
+            yield content
+        if not streamed_content and deferred_answer:
+            yield deferred_answer
 
 
 def _parse_payload(body: bytes) -> AgentRequestMessage:

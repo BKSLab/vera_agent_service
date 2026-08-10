@@ -15,6 +15,40 @@ CONFIRMATION_REQUEST_MARKER = '?'
 Не заменяет собой полноценный confirmation token (см. карточку VERA-021,
 "вне скоупа") — минимальное проверяемое условие для этого прогона."""
 
+_EMAIL_SEND_INTENT_MARKERS = (
+    'отправ',
+    'высл',
+    'перешл',
+    'пришл',
+    'направ',
+    'пошл',
+    'скин',
+)
+
+CONSULTATION_EMAIL_GUARD_NOTICE = (
+    'Подтвердите, пожалуйста, адрес электронной почты и отправку консультации?'
+)
+"""Детерминированный ответ для неразрешённой попытки email-вызова."""
+
+UNSAFE_TOOL_CALL_RESPONSE = (
+    'Не удалось сформировать безопасный ответ. Попробуйте повторить запрос позже.'
+)
+"""Безопасный fallback, если служебный tool-синтаксис всё же попал в текст."""
+
+PSEUDO_TOOL_CALL_MARKERS = (
+    'call:default_api:',
+    'send_consultation_email{',
+    'send_consultation_email(',
+    'vera_rag_kb{',
+    'vera_rag_kb(',
+)
+
+
+def contains_pseudo_tool_call(text: str) -> bool:
+    """Распознаёт служебный синтаксис MCP, утёкший в обычный текст."""
+    normalized = ''.join(text.lower().split())
+    return any(marker in normalized for marker in PSEUDO_TOOL_CALL_MARKERS)
+
 _FACTUAL_LEGAL_KEYWORDS = (
     'закон',
     'кодекс',
@@ -68,30 +102,47 @@ def find_last_human_message(messages: list[BaseMessage]) -> HumanMessage | None:
     return None
 
 
-def consultation_email_send_is_confirmed(messages: list[BaseMessage], email: str) -> bool:
-    """Проверяет по сохранённой истории два факта из карточки VERA-021,
-    вместо того чтобы доверять только намерению, распознанному моделью:
-    адрес получателя присутствует в тексте сообщения пользователя текущего
-    turn'а, и предыдущий ответ ассистента запрашивал подтверждение.
+def _human_message_positions(messages: list[BaseMessage]) -> list[int]:
+    return [
+        position
+        for position, message in enumerate(messages)
+        if isinstance(message, HumanMessage)
+    ]
 
-    Возвращает `False`, если в истории нет ни одного сообщения пользователя
-    или ни одного предшествующего ответа ассистента — первая реплика
-    диалога не может быть кодово подтверждённой отправкой.
+
+def _contains_email_in_human_history(messages: list[BaseMessage], email: str) -> bool:
+    email_lower = email.lower()
+    return any(
+        isinstance(message.content, str) and email_lower in message.content.lower()
+        for message in messages
+        if isinstance(message, HumanMessage)
+    )
+
+
+def _has_send_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _EMAIL_SEND_INTENT_MARKERS)
+
+
+def consultation_email_send_is_confirmed(messages: list[BaseMessage], email: str) -> bool:
+    """Проверяет, что адрес и намерение отправки пришли от пользователя.
+
+    Явная первая просьба с email разрешается без искусственного предыдущего
+    вопроса ассистента. Для сценария «Вера спросила адрес -> пользователь
+    ответил коротко» сохраняется подтверждение по предыдущему ответу и
+    адресу, который уже был введён человеком в этой сессии.
     """
     if not email:
         return False
 
-    last_human_position = None
-    for position in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[position], HumanMessage):
-            last_human_position = position
-            break
-    if last_human_position is None:
+    human_positions = _human_message_positions(messages)
+    if not human_positions:
         return False
 
+    last_human_position = human_positions[-1]
     last_human = messages[last_human_position]
-    if not isinstance(last_human.content, str) or email.lower() not in last_human.content.lower():
-        return False
+    current_text = last_human.content if isinstance(last_human.content, str) else ''
+    email_in_current_message = email.lower() in current_text.lower()
 
     previous_ai = next(
         (
@@ -101,6 +152,15 @@ def consultation_email_send_is_confirmed(messages: list[BaseMessage], email: str
         ),
         None,
     )
-    if previous_ai is None or not isinstance(previous_ai.content, str):
-        return False
-    return CONFIRMATION_REQUEST_MARKER in previous_ai.content
+    previous_ai_requested_confirmation = bool(
+        previous_ai is not None
+        and isinstance(previous_ai.content, str)
+        and CONFIRMATION_REQUEST_MARKER in previous_ai.content
+    )
+
+    if email_in_current_message:
+        return previous_ai_requested_confirmation or _has_send_intent(current_text)
+
+    return previous_ai_requested_confirmation and _contains_email_in_human_history(
+        messages[:last_human_position], email
+    )

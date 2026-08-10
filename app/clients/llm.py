@@ -10,7 +10,7 @@ from langchain_openai import ChatOpenAI
 from openai import APIConnectionError, APITimeoutError
 
 from app.core.settings import LlmSettings
-from app.exceptions.llm import LlmApiRequestError
+from app.exceptions.llm import EmptyLlmStreamError, LlmApiRequestError
 
 logger = logging.getLogger('vera_agent_service')
 
@@ -30,6 +30,37 @@ _REQUEST_ERRORS: tuple[type[Exception], ...] = (
     httpx.TimeoutException,
     httpx.RequestError,
 )
+
+
+def _visible_text_from_content(content: object) -> str:
+    """Извлекает только текст, предназначенный пользователю.
+
+    OpenAI-совместимые провайдеры могут прислать content-блоки списком:
+    reasoning/tool metadata в таком списке не является ответом и не должен
+    взводить флаг начала стриминга или попасть в SSE.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ''
+
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        if block.get('type') not in (None, 'text'):
+            continue
+        text = block.get('text')
+        if isinstance(text, str):
+            parts.append(text)
+    return ''.join(parts)
+
+
+def _visible_text_from_chunk(chunk: AIMessageChunk) -> str:
+    return _visible_text_from_content(chunk.content)
 
 
 def get_chat_model(httpx_client: httpx.AsyncClient, settings: LlmSettings) -> ChatOpenAI:
@@ -93,7 +124,7 @@ async def ainvoke_with_retry(
             last_error = error
             logger.warning('⚠️ Ошибка запроса к LLM (попытка %d/%d): %s', attempt, retries, error)
         else:
-            if not result.content and not result.tool_calls:
+            if not _visible_text_from_content(result.content) and not result.tool_calls:
                 last_error = ValueError('LLM вернул пустой ответ без tool_calls')
                 logger.warning(
                     '📭 Некорректный контент от LLM (попытка %d/%d): %s', attempt, retries, last_error
@@ -121,50 +152,61 @@ async def astream_tokens(
 ) -> AsyncIterator[str]:
     """Стримингованный вызов модели (генерация ответа, Этап 4.3/4.4).
 
-    Ретраится только получение **первого** чанка — как только хотя бы один
-    токен отдан вызывающему коду, повтор всего вызова прекращается и любая
-    следующая ошибка всплывает немедленно. Согласуется с решением раздела
-    0.1 плана: RabbitMQ-consumer (Этап 6.3) не переигрывает сообщение после
-    того как стриминг клиенту уже начался — тот же принцип применяется и
-    здесь, на уровне отдельного вызова LLM.
+    Ретраится только получение **первого видимого текстового токена** —
+    служебные role/reasoning/tool-call чанки и финальный DONE не считаются
+    началом ответа. Как только текст отдан вызывающему коду, повтор всего
+    вызова прекращается. Если поток завершился без текста, повторяется только
+    этот финальный LLM-вызов, а не весь граф.
 
     Raises:
-        LlmApiRequestError: если не удалось получить даже первый чанк после
-            исчерпания попыток.
+        LlmApiRequestError: если запросы к API не удалось выполнить.
+        EmptyLlmStreamError: если все потоки завершились без текста.
     """
     last_error: Exception | None = None
-    stream: AsyncIterator[AIMessageChunk] | None = None
-    first_chunk: AIMessageChunk | None = None
 
     for attempt in range(1, retries + 1):
-        stream = model.astream(messages)
+        visible_text_emitted = False
         try:
-            first_chunk = await anext(stream, None)
+            async for chunk in model.astream(messages):
+                content = _visible_text_from_chunk(chunk)
+                if not content.strip():
+                    continue
+                visible_text_emitted = True
+                yield content
         except _REQUEST_ERRORS as error:
+            if visible_text_emitted:
+                raise
             last_error = error
             logger.warning(
                 '⚠️ Ошибка запроса к LLM при старте стриминга (попытка %d/%d): %s', attempt, retries, error
             )
-            if attempt < retries:
-                delay = _get_backoff_delay(attempt)
-                logger.info('🔄 Повтор через %.1fс (следующая попытка: %d/%d)', delay, attempt + 1, retries)
-                await asyncio.sleep(delay)
-            continue
         else:
-            if attempt > 1:
-                logger.info('✅ Стриминг начат с %d-й попытки', attempt)
-            break
-    else:
-        logger.error(
-            '❌ Не удалось начать стриминг ответа LLM после %d попыток. Последняя ошибка: %s',
-            retries,
-            last_error,
-        )
-        raise LlmApiRequestError(str(last_error))
+            if visible_text_emitted:
+                if attempt > 1:
+                    logger.info('✅ Видимый текстовый стриминг начат с %d-й попытки', attempt)
+                return
+            last_error = EmptyLlmStreamError()
+            logger.warning(
+                '📭 LLM завершила поток без видимого текста (попытка %d/%d)',
+                attempt,
+                retries,
+            )
 
-    if first_chunk is not None and first_chunk.content:
-        yield first_chunk.content
-    if stream is not None:
-        async for chunk in stream:
-            if chunk.content:
-                yield chunk.content
+        if attempt < retries:
+            delay = _get_backoff_delay(attempt)
+            logger.info('🔄 Повтор через %.1fс (следующая попытка: %d/%d)', delay, attempt + 1, retries)
+            await asyncio.sleep(delay)
+
+    if isinstance(last_error, EmptyLlmStreamError):
+        logger.error(
+            '❌ Не удалось получить видимый текстовый ответ LLM после %d попыток',
+            retries,
+        )
+        raise last_error
+
+    logger.error(
+        '❌ Не удалось начать стриминг ответа LLM после %d попыток. Последняя ошибка: %s',
+        retries,
+        last_error,
+    )
+    raise LlmApiRequestError(str(last_error))

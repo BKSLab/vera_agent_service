@@ -422,7 +422,9 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
 
         assert requests == []
         assert turn1['tool_calls'] == []
-        assert turn1['messages'][-1].content == 'Подтвердите, пожалуйста, ваш email?'
+        assert turn1['messages'][-1].content == (
+            'Подтвердите, пожалуйста, адрес электронной почты и отправку консультации?'
+        )
 
         turn2_state = {
             'session_id': 's',
@@ -442,7 +444,7 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
             }
         ]
         assert turn2['tool_calls'] == ['send_consultation_email']
-        assert turn2['messages'][-1].content == f'Документ отправлен на {email}.'
+        assert turn2['messages'][-1].content.startswith(f'Документ отправлен на {email}.')
 
 
 async def test_automatic_email_spans_redact_consultation_and_recipient():

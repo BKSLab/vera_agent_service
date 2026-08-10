@@ -133,10 +133,12 @@ async def test_returns_empty_update_when_tool_not_needed():
     assert trace_data.search_required is False
 
 
-async def test_consultation_email_tool_call_is_dropped_without_prior_confirmation_request():
-    """Модель решила вызвать мутирующий тул уже в первой реплике диалога —
-    без предшествующего запроса подтверждения от ассистента код не
-    доверяет одному лишь намерению модели (VERA-021)."""
+async def test_consultation_email_tool_call_is_allowed_for_explicit_request_with_email():
+    """Явная просьба пользователя с адресом уже является подтверждением.
+
+    Код проверяет именно пользовательский текст, а не одно только решение
+    модели вызвать mutating tool (VERA-021).
+    """
     arguments = {
         'consultation_text': 'Итоговая консультация без предварительного форматирования.',
         'email': 'user@example.com',
@@ -154,13 +156,15 @@ async def test_consultation_email_tool_call_is_dropped_without_prior_confirmatio
     finally:
         reset_request_trace(token)
 
-    assert result == {}
-    assert trace_data.route == 'direct'
+    ai_message = result['messages'][0]
+    assert ai_message.tool_calls[0]['name'] == 'send_consultation_email'
+    assert ai_message.tool_calls[0]['args'] == arguments
+    assert trace_data.route == 'consultation_email'
 
 
-async def test_consultation_email_tool_call_is_dropped_when_email_missing_from_current_message():
-    """Предыдущий ответ запросил подтверждение, но в текущем сообщении
-    пользователя нет самого адреса — тул всё равно не вызывается."""
+async def test_consultation_email_tool_call_is_guarded_when_email_never_typed_by_user():
+    """Адрес, который пользователь не вводил, нельзя отправить по решению
+    модели, даже если в истории уже был вопрос о подтверждении."""
     arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
     chat_model = chat_model_with_handler(
         lambda request: _tool_call_response('send_consultation_email', arguments),
@@ -180,8 +184,38 @@ async def test_consultation_email_tool_call_is_dropped_when_email_missing_from_c
     finally:
         reset_request_trace(token)
 
-    assert result == {}
+    assert result == {
+        'consultation_email_guard_notice': (
+            'Подтвердите, пожалуйста, адрес электронной почты и отправку консультации?'
+        )
+    }
     assert trace_data.route == 'direct'
+
+
+async def test_consultation_email_tool_call_is_allowed_when_address_was_given_in_earlier_turn():
+    """Короткое «да» после переспроса не требует повторять ранее введённый
+    адрес в той же реплике."""
+    arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response('send_consultation_email', arguments),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
+    history = [
+        HumanMessage(content='Мой email user@example.com, отправь консультацию'),
+        AIMessage(content='Подтвердите отправку?'),
+        HumanMessage(content='Да, отправляйте'),
+    ]
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state_with_messages(history))
+    finally:
+        reset_request_trace(token)
+
+    assert result['messages'][0].tool_calls[0]['name'] == 'send_consultation_email'
+    assert trace_data.route == 'consultation_email'
 
 
 async def test_consultation_email_tool_call_is_allowed_after_explicit_confirmation():
