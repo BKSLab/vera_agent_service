@@ -11,6 +11,7 @@ from langchain_mcp_adapters.interceptors import MCPToolCallRequest, MCPToolCallR
 from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
 from opentelemetry import propagate
 from opentelemetry.trace import Status, StatusCode
+from pydantic import BaseModel, ValidationError
 
 from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
@@ -141,14 +142,17 @@ async def call_tool_with_retry(
     arguments: dict,
     retries: int,
     timeout_seconds: float,
+    result_schema: type[BaseModel],
 ) -> dict:
     """Вызывает MCP-тул с ретраями и разбирает content-блоки ответа в
-    обычный `dict` (см. `_parse_tool_result`).
+    обычный `dict`, проверенный по Pydantic-схеме (см. `_parse_tool_result`).
 
     Raises:
         McpUnavailableError: если все попытки исчерпаны — сеть, таймаут,
-            ошибка выполнения тула на MCP-сервере или неожиданный формат
-            ответа (раздел 0.1: для вызывающего кода все три равнозначны).
+            ошибка выполнения тула на MCP-сервере, неожиданный формат
+            ответа или ответ, не прошедший проверку `result_schema`
+            (раздел 0.1, VERA-021: для вызывающего кода все случаи
+            равнозначны — "результат недоступен").
     """
     query = arguments.get('query')
     with get_tracer().start_as_current_span(
@@ -163,7 +167,7 @@ async def call_tool_with_retry(
         for attempt in range(1, retries + 1):
             try:
                 raw_result = await asyncio.wait_for(tool.ainvoke(arguments), timeout=timeout_seconds)
-                result = _parse_tool_result(raw_result)
+                result = _parse_tool_result(raw_result, result_schema)
                 chunks = result.get('chunks', [])
                 retry_count = attempt - 1
                 span.set_attribute('tool.retry.count', retry_count)
@@ -215,12 +219,17 @@ async def call_mutating_tool_once(
     tool: BaseTool,
     arguments: dict,
     timeout_seconds: float,
+    result_schema: type[BaseModel],
 ) -> dict:
     """Вызывает мутирующий MCP-инструмент ровно один раз.
 
     Повтор после timeout/сетевой ошибки запрещён: SMTP мог принять письмо до
     разрыва соединения. Полные аргументы и ответ не записываются в span,
     поскольку содержат консультацию и email.
+
+    Ответ проверяется по `result_schema` (VERA-021) — структурно некорректный
+    результат (не тот тип поля, несколько content-блоков) даёт тот же
+    исход, что и сетевая ошибка: `McpUnavailableError` ниже.
     """
     consultation_text = arguments.get('consultation_text')
     with get_tracer().start_as_current_span(
@@ -244,7 +253,7 @@ async def call_mutating_tool_once(
                 tool.ainvoke(arguments),
                 timeout=timeout_seconds,
             )
-            result = _parse_tool_result(raw_result)
+            result = _parse_tool_result(raw_result, result_schema)
         except Exception as error:
             unavailable_error = McpUnavailableError(
                 'Не удалось подтвердить результат мутирующего MCP-вызова'
@@ -345,19 +354,38 @@ def build_consultation_email_tool_proxy(
     return send_consultation_email
 
 
-def _parse_tool_result(raw_result: Any) -> dict:
-    """Разбирает ответ MCP-тула в обычный `dict`.
+def _parse_tool_result(raw_result: Any, result_schema: type[BaseModel]) -> dict:
+    """Разбирает ответ MCP-тула в обычный `dict` и проверяет его форму по
+    `result_schema` (VERA-021) — вместо `json.loads` без проверки формы.
 
-    MCP-протокол возвращает результат тула как список content-блоков
-    (`[{"type": "text", "text": "<json>"}]`), не сырой `dict` — проверено
-    эмпирически с `langchain-mcp-adapters==0.3.0`. Ожидаемый формат
-    text-блока — JSON-словарь конкретного инструмента.
+    MCP-протокол возвращает результат тула как список **ровно из одного**
+    content-блока (`[{"type": "text", "text": "<json>"}]`), не сырой `dict`
+    — проверено эмпирически с `langchain-mcp-adapters==0.3.0`. Другое
+    количество блоков — признак сломанного или изменившегося протокола:
+    результат не разбирается по первому блоку молча, а отвергается.
     """
     if isinstance(raw_result, dict):
-        return raw_result
-    if isinstance(raw_result, list) and raw_result:
+        parsed = raw_result
+    elif isinstance(raw_result, list):
+        if len(raw_result) != 1:
+            raise McpUnavailableError(
+                f'MCP-тул вернул {len(raw_result)} content-блоков вместо одного: {raw_result!r}'
+            )
         first_block = raw_result[0]
         text = first_block.get('text') if isinstance(first_block, dict) else None
-        if text:
-            return json.loads(text)
-    raise McpUnavailableError(f'Неожиданный формат ответа MCP-тула: {raw_result!r}')
+        if not text:
+            raise McpUnavailableError(f'Неожиданный формат ответа MCP-тула: {raw_result!r}')
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise McpUnavailableError(f'Ответ MCP-тула не является валидным JSON: {error}') from error
+    else:
+        raise McpUnavailableError(f'Неожиданный формат ответа MCP-тула: {raw_result!r}')
+
+    try:
+        validated = result_schema.model_validate(parsed)
+    except ValidationError as error:
+        raise McpUnavailableError(
+            f'Результат MCP-тула не прошёл проверку схемы {result_schema.__name__}: {error}'
+        ) from error
+    return validated.model_dump(exclude_unset=True)

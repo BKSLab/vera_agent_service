@@ -12,6 +12,7 @@ from app.clients.mcp_client import (
 )
 from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
+from app.schemas.mcp_tool_results import ConsultationEmailToolResult, KbSearchToolResult
 from tests.fixtures.mock_mcp_server import create_mock_mcp_app, run_mock_mcp_server
 
 pytestmark = pytest.mark.integration
@@ -38,6 +39,7 @@ async def test_get_tools_and_call_kb_search_against_real_mock_server():
             {'query': 'квота'},
             retries=settings.mcp_call_retries,
             timeout_seconds=settings.mcp_call_timeout_seconds,
+            result_schema=KbSearchToolResult,
         )
         assert result == {'chunks': chunks}
 
@@ -57,6 +59,7 @@ async def test_call_kb_search_returns_empty_chunks_when_rag_has_no_answer():
             {'query': 'вопрос вне тематики БЗ'},
             retries=1,
             timeout_seconds=5.0,
+            result_schema=KbSearchToolResult,
         )
         assert result == {'chunks': []}
 
@@ -75,6 +78,7 @@ async def test_call_kb_search_raises_mcp_unavailable_when_tool_execution_fails()
                 {'query': 'q'},
                 retries=2,
                 timeout_seconds=5.0,
+                result_schema=KbSearchToolResult,
             )
 
 
@@ -92,6 +96,7 @@ async def test_call_kb_search_raises_mcp_unavailable_on_timeout():
                 {'query': 'q'},
                 retries=1,
                 timeout_seconds=0.2,
+                result_schema=KbSearchToolResult,
             )
 
 
@@ -112,6 +117,7 @@ async def test_call_consultation_email_once_against_real_mock_server():
             tools_by_name['send_consultation_email'],
             arguments,
             timeout_seconds=5.0,
+            result_schema=ConsultationEmailToolResult,
         )
 
         assert result['status'] == 'ok'

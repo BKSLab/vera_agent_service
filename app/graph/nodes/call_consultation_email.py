@@ -10,6 +10,7 @@ from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
 from app.graph.state import AgentState
 from app.observability.request_trace import get_request_trace
+from app.schemas.mcp_tool_results import ConsultationEmailToolResult
 
 UNCONFIRMED_DELIVERY_RESULT = {
     'status': 'error',
@@ -53,6 +54,7 @@ def create_call_consultation_email_node(
                 timeout_seconds=(
                     mcp_settings.mcp_consultation_email_timeout_seconds
                 ),
+                result_schema=ConsultationEmailToolResult,
             )
         except McpUnavailableError:
             result = dict(UNCONFIRMED_DELIVERY_RESULT)

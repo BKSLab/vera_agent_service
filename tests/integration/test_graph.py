@@ -201,6 +201,28 @@ async def test_question_needing_kb_search_reaches_generate_with_context():
         assert final_message.content == 'Квота 2%, источник ФЗ-181.'
 
 
+async def test_factual_question_reaches_kb_search_even_without_model_tool_call():
+    """VERA-021: модель ошибочно решает ответить напрямую на вопрос из
+    предметной области базы знаний — код принудительно направляет его в
+    поиск вместо прямого ответа мимо RAG."""
+    chunks = [{'chunk_id': 'c1', 'source_title': 'ФЗ-181, Статья 21', 'text': 'Квота составляет 2 процента'}]
+    app = create_mock_mcp_app(chunks=chunks)
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=1)
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=5.0)
+
+        chat_model = _build_chat_model(
+            _conversational_handler(final_pieces=['Квота ', '2%, источник ФЗ-181.'])
+        )
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        result = await graph.ainvoke(_initial_state('Какая квота на трудоустройство инвалидов?'))
+
+        assert result['tool_calls'] == ['vera_rag_kb']
+        assert result['retrieved_chunks'] == chunks
+
+
 async def test_greeting_goes_directly_to_generate_direct_without_mcp_call():
     app = create_mock_mcp_app(fail_message='vera_rag_kb не должен вызываться для этого вопроса')
     async with run_mock_mcp_server(app) as url:
@@ -299,7 +321,12 @@ async def test_first_token_arrives_quickly_against_mocked_llm():
         assert (first_token_at - start) < 2.0
 
 
-async def test_consultation_email_is_called_once_with_complete_arguments():
+async def test_consultation_email_requires_current_turn_confirmation_before_sending():
+    """VERA-021: мутирующая отправка не выполняется по одному лишь
+    намерению модели, распознанному за один шаг. Первая попытка (без
+    предшествующего запроса подтверждения) блокируется кодом; тул
+    вызывается только после явного подтверждения адреса в следующей
+    реплике пользователя."""
     requests: list[dict] = []
     app = create_mock_mcp_app(consultation_requests=requests)
     async with run_mock_mcp_server(app) as url:
@@ -319,32 +346,45 @@ async def test_consultation_email_is_called_once_with_complete_arguments():
             'Итоговая консультация.\n\nРаботодатель обязан учитывать '
             'требования законодательства.'
         )
-        chat_model = _build_chat_model(
-            _conversational_handler(
-                tool_name='send_consultation_email',
-                tool_arguments={
-                    'consultation_text': consultation_text,
-                    'email': 'user@example.com',
-                },
-                final_pieces=['Документ отправлен на user@example.com.'],
-            )
-        )
+        email = 'user@example.com'
+
+        def handler(request):
+            payload = json.loads(request.content)
+            if not payload.get('stream'):
+                # Модель каждый раз пытается вызвать мутирующий тул — код
+                # должен заблокировать попытку без адреса в ТЕКУЩЕМ
+                # сообщении пользователя (VERA-021).
+                return _tool_call_completion(
+                    'send_consultation_email',
+                    {'consultation_text': consultation_text, 'email': email},
+                )
+            last_user_message = [m for m in payload['messages'] if m['role'] == 'user'][-1]['content']
+            if email in last_user_message:
+                return _stream_response(['Документ отправлен на ', email, '.'])
+            return _stream_response(['Подтвердите, пожалуйста, ваш email?'])
+
+        chat_model = _build_chat_model(handler)
         graph = _compile_graph(chat_model, tools, mcp_settings)
 
-        result = await graph.ainvoke(
-            _initial_state('Отправь консультацию на user@example.com')
-        )
+        turn1 = await graph.ainvoke(_initial_state('Отправь итоговую консультацию мне на почту'))
 
-        assert requests == [
-            {
-                'consultation_text': consultation_text,
-                'email': 'user@example.com',
-            }
-        ]
-        assert result['tool_calls'] == ['send_consultation_email']
-        assert result['messages'][-1].content == (
-            'Документ отправлен на user@example.com.'
-        )
+        assert requests == []
+        assert turn1['tool_calls'] == []
+        assert turn1['messages'][-1].content == 'Подтвердите, пожалуйста, ваш email?'
+
+        turn2_state = {
+            'session_id': 's',
+            'user_id': None,
+            'messages': [*turn1['messages'], HumanMessage(content=f'Да, {email}')],
+            'retrieved_chunks': [],
+            'tool_calls': [],
+            'search_unavailable': False,
+        }
+        turn2 = await graph.ainvoke(turn2_state)
+
+        assert requests == [{'consultation_text': consultation_text, 'email': email}]
+        assert turn2['tool_calls'] == ['send_consultation_email']
+        assert turn2['messages'][-1].content == f'Документ отправлен на {email}.'
 
 
 async def test_automatic_email_spans_redact_consultation_and_recipient():
@@ -367,19 +407,34 @@ async def test_automatic_email_spans_redact_consultation_and_recipient():
         )
         consultation_text = 'Уникальный секретный текст консультации VERA-022'
         recipient = 'vera-022-private@example.test'
-        chat_model = _build_chat_model(
-            _conversational_handler(
-                tool_name='send_consultation_email',
-                tool_arguments={
-                    'consultation_text': consultation_text,
-                    'email': recipient,
-                },
-                final_pieces=['Документ отправлен.'],
-            )
-        )
+
+        def handler(request):
+            payload = json.loads(request.content)
+            if not payload.get('stream'):
+                return _tool_call_completion(
+                    'send_consultation_email',
+                    {'consultation_text': consultation_text, 'email': recipient},
+                )
+            last_user_message = [m for m in payload['messages'] if m['role'] == 'user'][-1]['content']
+            if recipient in last_user_message:
+                return _stream_response(['Документ отправлен.'])
+            return _stream_response(['Подтвердите, пожалуйста, ваш email?'])
+
+        chat_model = _build_chat_model(handler)
         graph = _compile_graph(chat_model, tools, mcp_settings)
 
-        await graph.ainvoke(_initial_state(f'Отправь консультацию на {recipient}'))
+        # Первая попытка без предшествующего запроса подтверждения
+        # блокируется кодом (VERA-021) — тул ещё не вызывается.
+        turn1 = await graph.ainvoke(_initial_state('Отправь итоговую консультацию на почту'))
+        turn2_state = {
+            'session_id': 's',
+            'user_id': None,
+            'messages': [*turn1['messages'], HumanMessage(content=f'Да, {recipient}')],
+            'retrieved_chunks': [],
+            'tool_calls': [],
+            'search_unavailable': False,
+        }
+        await graph.ainvoke(turn2_state)
 
     assert requests == [
         {

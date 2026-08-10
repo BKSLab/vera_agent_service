@@ -1,7 +1,7 @@
 import json
 
 import httpx
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import tool
 
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
@@ -25,15 +25,19 @@ async def send_consultation_email(consultation_text: str, email: str) -> dict:
     return {'status': 'ok', 'email': email, 'document_name': 'consultation.pdf'}
 
 
-def _state(text: str):
+def _state_with_messages(messages: list[BaseMessage]):
     return {
         'session_id': 's',
         'user_id': None,
-        'messages': [HumanMessage(content=text)],
+        'messages': messages,
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
     }
+
+
+def _state(text: str):
+    return _state_with_messages([HumanMessage(content=text)])
 
 
 def _completion(message: dict, finish_reason: str) -> httpx.Response:
@@ -124,23 +128,19 @@ async def test_returns_empty_update_when_tool_not_needed():
     assert trace_data.search_required is False
 
 
-async def test_routes_explicit_consultation_email_request_to_mutating_tool():
+async def test_consultation_email_tool_call_is_dropped_without_prior_confirmation_request():
+    """Модель решила вызвать мутирующий тул уже в первой реплике диалога —
+    без предшествующего запроса подтверждения от ассистента код не
+    доверяет одному лишь намерению модели (VERA-021)."""
     arguments = {
         'consultation_text': 'Итоговая консультация без предварительного форматирования.',
         'email': 'user@example.com',
     }
     chat_model = chat_model_with_handler(
-        lambda request: _tool_call_response(
-            'send_consultation_email',
-            arguments,
-        ),
+        lambda request: _tool_call_response('send_consultation_email', arguments),
         streaming=False,
     )
-    node = create_analyze_intent_node(
-        chat_model,
-        vera_rag_kb,
-        send_consultation_email,
-    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
 
     trace_data = AgentRequestTraceData()
     token = set_request_trace(trace_data)
@@ -149,8 +149,101 @@ async def test_routes_explicit_consultation_email_request_to_mutating_tool():
     finally:
         reset_request_trace(token)
 
+    assert result == {}
+    assert trace_data.route == 'direct'
+
+
+async def test_consultation_email_tool_call_is_dropped_when_email_missing_from_current_message():
+    """Предыдущий ответ запросил подтверждение, но в текущем сообщении
+    пользователя нет самого адреса — тул всё равно не вызывается."""
+    arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response('send_consultation_email', arguments),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    history = [
+        HumanMessage(content='Отправь мне итог консультации на почту'),
+        AIMessage(content='Подтвердите, пожалуйста, ваш email?'),
+        HumanMessage(content='Да, отправляйте'),
+    ]
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state_with_messages(history))
+    finally:
+        reset_request_trace(token)
+
+    assert result == {}
+    assert trace_data.route == 'direct'
+
+
+async def test_consultation_email_tool_call_is_allowed_after_explicit_confirmation():
+    """Оба кодовых факта выполнены: адрес в тексте текущего сообщения и
+    запрос подтверждения в предыдущем ответе ассистента (VERA-021)."""
+    arguments = {'consultation_text': 'Итог консультации.', 'email': 'user@example.com'}
+    chat_model = chat_model_with_handler(
+        lambda request: _tool_call_response('send_consultation_email', arguments),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+    history = [
+        HumanMessage(content='Отправь мне итог консультации на почту'),
+        AIMessage(content='Подтвердите, пожалуйста, ваш email?'),
+        HumanMessage(content='Да, user@example.com'),
+    ]
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state_with_messages(history))
+    finally:
+        reset_request_trace(token)
+
     ai_message = result['messages'][0]
     assert ai_message.tool_calls[0]['name'] == 'send_consultation_email'
     assert ai_message.tool_calls[0]['args'] == arguments
     assert trace_data.route == 'consultation_email'
     assert trace_data.search_required is False
+
+
+async def test_factual_question_without_tool_call_is_forced_into_kb_search():
+    """Модель ошибочно решила ответить напрямую на вопрос из предметной
+    области базы знаний — код принудительно направляет его в поиск
+    (VERA-021)."""
+    chat_model = chat_model_with_handler(
+        lambda request: _direct_response('Квота обычно небольшая.'),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state('Какая квота на трудоустройство инвалидов?'))
+    finally:
+        reset_request_trace(token)
+
+    ai_message = result['messages'][0]
+    assert ai_message.tool_calls[0]['name'] == 'vera_rag_kb'
+    assert ai_message.tool_calls[0]['args'] == {
+        'query': 'Какая квота на трудоустройство инвалидов?'
+    }
+    assert trace_data.route == 'knowledge_base'
+    assert trace_data.search_required is True
+
+
+async def test_non_factual_greeting_without_tool_call_stays_direct():
+    chat_model = chat_model_with_handler(lambda request: _direct_response('Привет!'), streaming=False)
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email)
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state('привет'))
+    finally:
+        reset_request_trace(token)
+
+    assert result == {}
+    assert trace_data.route == 'direct'

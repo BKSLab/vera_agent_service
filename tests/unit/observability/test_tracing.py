@@ -23,6 +23,7 @@ from app.observability.tracing import (
     reset_for_tests,
     shutdown_tracing,
 )
+from app.schemas.mcp_tool_results import ConsultationEmailToolResult, KbSearchToolResult
 from app.streaming.session_bus import SessionBus
 
 _exporter = InMemorySpanExporter()
@@ -108,6 +109,7 @@ class _ToolCallingGraph:
                 {'query': 'q'},
                 retries=2,
                 timeout_seconds=1.0,
+                result_schema=KbSearchToolResult,
             )
             trace_data.search_chunk_count = len(result['chunks'])
             yield _stream_event('Ответ', node='generate_with_context')
@@ -204,6 +206,7 @@ async def test_tool_call_creates_logical_span_with_aggregates():
         {'query': query},
         retries=1,
         timeout_seconds=1.0,
+        result_schema=KbSearchToolResult,
     )
 
     span = _finished_span('tool.vera_rag_kb')
@@ -230,6 +233,7 @@ async def test_mutating_tool_span_excludes_consultation_and_email():
             'email': email,
         },
         timeout_seconds=1.0,
+        result_schema=ConsultationEmailToolResult,
     )
 
     span = _finished_span('tool.send_consultation_email')

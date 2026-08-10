@@ -13,6 +13,7 @@ from app.clients.mcp_client import (
 )
 from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
+from app.schemas.mcp_tool_results import ConsultationEmailToolResult, KbSearchToolResult
 
 
 class _FakeTool:
@@ -154,7 +155,9 @@ async def test_consultation_email_proxy_resolves_remote_tool_once_and_preserves_
 
 async def test_call_tool_with_retry_parses_text_content_block():
     tool = _FakeTool(results=[[{'type': 'text', 'text': '{"chunks": []}'}]])
-    result = await call_tool_with_retry(tool, {'query': 'q'}, retries=3, timeout_seconds=1.0)
+    result = await call_tool_with_retry(
+        tool, {'query': 'q'}, retries=3, timeout_seconds=1.0, result_schema=KbSearchToolResult
+    )
     assert result == {'chunks': []}
 
 
@@ -163,7 +166,9 @@ async def test_call_tool_with_retry_retries_on_tool_execution_error_then_succeed
         results=[None, [{'type': 'text', 'text': '{"chunks": [{"chunk_id": "c1"}]}'}]],
         exceptions=[RuntimeError('MCP tool failed'), None],
     )
-    result = await call_tool_with_retry(tool, {'query': 'q'}, retries=3, timeout_seconds=1.0)
+    result = await call_tool_with_retry(
+        tool, {'query': 'q'}, retries=3, timeout_seconds=1.0, result_schema=KbSearchToolResult
+    )
     assert result == {'chunks': [{'chunk_id': 'c1'}]}
     assert tool.call_count == 2
 
@@ -171,12 +176,43 @@ async def test_call_tool_with_retry_retries_on_tool_execution_error_then_succeed
 async def test_call_tool_with_retry_raises_after_exhausting_retries():
     tool = _FakeTool(results=[None, None], exceptions=[RuntimeError('a'), RuntimeError('b')])
     with pytest.raises(McpUnavailableError):
-        await call_tool_with_retry(tool, {'query': 'q'}, retries=2, timeout_seconds=1.0)
+        await call_tool_with_retry(
+            tool, {'query': 'q'}, retries=2, timeout_seconds=1.0, result_schema=KbSearchToolResult
+        )
 
 
 async def test_call_tool_with_retry_times_out():
     with pytest.raises(McpUnavailableError):
-        await call_tool_with_retry(_HangingTool(), {'query': 'q'}, retries=1, timeout_seconds=0.05)
+        await call_tool_with_retry(
+            _HangingTool(), {'query': 'q'}, retries=1, timeout_seconds=0.05, result_schema=KbSearchToolResult
+        )
+
+
+async def test_call_tool_with_retry_rejects_multi_block_response():
+    """Несколько content-блоков вместо одного — сломанный протокол, не
+    повод молча разобрать первый (VERA-021)."""
+    tool = _FakeTool(
+        results=[
+            [
+                {'type': 'text', 'text': '{"chunks": []}'},
+                {'type': 'text', 'text': '{"chunks": []}'},
+            ]
+        ]
+    )
+    with pytest.raises(McpUnavailableError):
+        await call_tool_with_retry(
+            tool, {'query': 'q'}, retries=1, timeout_seconds=1.0, result_schema=KbSearchToolResult
+        )
+
+
+async def test_call_tool_with_retry_rejects_result_failing_schema():
+    """Результат не проходит форму KbSearchToolResult — chunks не список
+    (VERA-021)."""
+    tool = _FakeTool(results=[[{'type': 'text', 'text': '{"chunks": "not-a-list"}'}]])
+    with pytest.raises(McpUnavailableError):
+        await call_tool_with_retry(
+            tool, {'query': 'q'}, retries=1, timeout_seconds=1.0, result_schema=KbSearchToolResult
+        )
 
 
 async def test_mutating_tool_is_called_once_and_result_is_parsed():
@@ -202,6 +238,7 @@ async def test_mutating_tool_is_called_once_and_result_is_parsed():
             'email': 'user@example.com',
         },
         timeout_seconds=1.0,
+        result_schema=ConsultationEmailToolResult,
     )
 
     assert result['status'] == 'ok'
@@ -223,20 +260,53 @@ async def test_mutating_tool_never_retries_after_execution_error():
                 'email': 'user@example.com',
             },
             timeout_seconds=1.0,
+            result_schema=ConsultationEmailToolResult,
         )
 
     assert tool.call_count == 1
 
 
+async def test_mutating_tool_rejects_result_failing_schema():
+    """Результат не проходит форму ConsultationEmailToolResult — `status`
+    не строка (VERA-021)."""
+    tool = _FakeTool(
+        name='send_consultation_email',
+        results=[[{'type': 'text', 'text': '{"status": [1, 2, 3]}'}]],
+    )
+
+    with pytest.raises(McpUnavailableError):
+        await call_mutating_tool_once(
+            tool,
+            {'consultation_text': 'Полный текст', 'email': 'user@example.com'},
+            timeout_seconds=1.0,
+            result_schema=ConsultationEmailToolResult,
+        )
+
+
 def test_parse_tool_result_accepts_plain_dict():
-    assert _parse_tool_result({'chunks': []}) == {'chunks': []}
+    assert _parse_tool_result({'chunks': []}, KbSearchToolResult) == {'chunks': []}
 
 
 def test_parse_tool_result_parses_text_content_block_list():
     raw = [{'type': 'text', 'text': '{"chunks": [{"chunk_id": "c1"}]}'}]
-    assert _parse_tool_result(raw) == {'chunks': [{'chunk_id': 'c1'}]}
+    assert _parse_tool_result(raw, KbSearchToolResult) == {'chunks': [{'chunk_id': 'c1'}]}
 
 
 def test_parse_tool_result_raises_on_unexpected_format():
     with pytest.raises(McpUnavailableError):
-        _parse_tool_result(42)
+        _parse_tool_result(42, KbSearchToolResult)
+
+
+def test_parse_tool_result_rejects_multiple_content_blocks():
+    raw = [
+        {'type': 'text', 'text': '{"chunks": []}'},
+        {'type': 'text', 'text': '{"chunks": []}'},
+    ]
+    with pytest.raises(McpUnavailableError):
+        _parse_tool_result(raw, KbSearchToolResult)
+
+
+def test_parse_tool_result_rejects_invalid_json_text_block():
+    raw = [{'type': 'text', 'text': 'не json'}]
+    with pytest.raises(McpUnavailableError):
+        _parse_tool_result(raw, KbSearchToolResult)

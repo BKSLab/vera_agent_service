@@ -42,6 +42,26 @@ def test_routes_to_consultation_email_node():
     assert route_after_analyze_intent(state) == 'call_consultation_email'
 
 
+def test_parallel_tool_calls_are_rejected():
+    """Больше одного tool_call от модели — ошибка маршрутизации, а не
+    повод молча выбрать первый (VERA-021)."""
+    ai_message = AIMessage(
+        content='',
+        tool_calls=[
+            {'id': 'call_1', 'name': 'vera_rag_kb', 'args': {'query': 'квота'}},
+            {
+                'id': 'call_2',
+                'name': 'send_consultation_email',
+                'args': {'consultation_text': 'текст', 'email': 'user@example.com'},
+            },
+        ],
+    )
+    state = _state([HumanMessage(content='вопрос'), ai_message])
+
+    with pytest.raises(ValueError, match='параллельные вызовы'):
+        route_after_analyze_intent(state)
+
+
 def test_unknown_tool_call_is_rejected():
     ai_message = AIMessage(
         content='',

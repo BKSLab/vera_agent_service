@@ -10,6 +10,7 @@ from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
 from app.graph.state import AgentState
 from app.observability.request_trace import get_request_trace
+from app.schemas.mcp_tool_results import KbSearchToolResult
 
 SEARCH_UNAVAILABLE_TOOL_MESSAGE = 'Поиск по базе знаний временно недоступен.'
 
@@ -39,6 +40,7 @@ def create_call_kb_search_node(
                 tool_call['args'],
                 retries=mcp_settings.mcp_call_retries,
                 timeout_seconds=mcp_settings.mcp_call_timeout_seconds,
+                result_schema=KbSearchToolResult,
             )
         except McpUnavailableError:
             if trace_data is not None:

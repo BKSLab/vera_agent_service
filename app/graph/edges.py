@@ -16,9 +16,18 @@ def route_after_analyze_intent(state: AgentState) -> str:
     см. `app/graph/nodes/analyze_intent.py`). Если тул не нужен,
     `analyze_intent` не меняет `messages` — последним остаётся исходный
     `HumanMessage` пользователя, который не является `AIMessage`.
+
+    Параллельные вызовы инструментов запрещены (VERA-021): больше одного
+    `tool_calls` — ошибка маршрутизации модели, а не повод молча выбрать
+    первый.
     """
     last_message = state['messages'][-1]
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        if len(last_message.tool_calls) > 1:
+            tool_names = [call['name'] for call in last_message.tool_calls]
+            raise ValueError(
+                f'Модель вернула параллельные вызовы инструментов, что запрещено: {tool_names}'
+            )
         tool_name = last_message.tool_calls[0]['name']
         if tool_name == VERA_RAG_KB_TOOL_NAME:
             return 'call_kb_search'
