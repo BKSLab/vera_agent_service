@@ -20,7 +20,10 @@ from app.db.models.chat_turn import (
     ChatTurn,
 )
 from app.dependencies.services import get_chat_session_lifecycle_service
-from app.exceptions.chat_session import ChatSessionAccessDeniedError
+from app.exceptions.chat_session import (
+    ChatSessionAccessDeniedError,
+    ChatSessionResolutionConflictError,
+)
 from app.graph.state import AgentState
 from app.main import app
 from app.repositories.chat_session import ChatSessionRepository
@@ -35,6 +38,7 @@ from app.services.chat_session_lifecycle import (
     ANONYMOUS_RECOVERY_OPERATION_ID_METADATA_KEY,
     SUCCESSOR_RECOVERY_DEADLINE_METADATA_KEY,
     SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY,
+    SUCCESSOR_SESSION_ID_METADATA_KEY,
     ChatSessionLifecycleService,
 )
 
@@ -127,6 +131,242 @@ async def test_missing_anonymous_session_is_created_with_current_owner(
     assert result.previous_session_id is None
     assert current is not None
     assert current.anonymous_token_hash == 'a' * 64
+
+
+async def test_explicit_auth_close_is_idempotent_and_excluded_from_current(
+    db_engine,
+    db_session,
+):
+    session_id = str(uuid.uuid4())
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        async def lifecycle_service_override():
+            async with session_factory() as request_session:
+                yield _service(request_session, checkpointer)
+
+        app.dependency_overrides[
+            get_chat_session_lifecycle_service
+        ] = lifecycle_service_override
+        limiter.reset()
+        try:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url='http://test',
+            ) as client:
+                headers = {
+                    'X-API-Key': (
+                        get_settings().app.api_key.get_secret_value()
+                    ),
+                    'X-Vera-User-ID': 'user-1',
+                }
+                payload = {'session_id': session_id}
+                created = await client.post(
+                    '/api/v1/chat/sessions',
+                    headers=headers,
+                    json=payload,
+                )
+                create_retry = await client.post(
+                    '/api/v1/chat/sessions',
+                    headers=headers,
+                    json=payload,
+                )
+                current_before = await client.get(
+                    '/api/v1/chat/sessions/current',
+                    headers=headers,
+                )
+                closed = await client.post(
+                    f'/api/v1/chat/sessions/{session_id}/close',
+                    headers=headers,
+                )
+                close_retry = await client.post(
+                    f'/api/v1/chat/sessions/{session_id}/close',
+                    headers=headers,
+                )
+                closed_create = await client.post(
+                    '/api/v1/chat/sessions',
+                    headers=headers,
+                    json=payload,
+                )
+                current_after = await client.get(
+                    '/api/v1/chat/sessions/current',
+                    headers=headers,
+                )
+        finally:
+            app.dependency_overrides.clear()
+            limiter.reset()
+
+    persisted = await ChatSessionRepository(db_session).get_by_session_id(
+        session_id
+    )
+    row_count = (
+        await db_session.execute(
+            select(func.count(ChatSession.id)).where(
+                ChatSession.session_id == session_id
+            )
+        )
+    ).scalar_one()
+
+    expected_created = {
+        'session_id': session_id,
+        'session_ttl_seconds': SESSION_TTL_SECONDS,
+    }
+    assert created.status_code == 200
+    assert create_retry.status_code == 200
+    assert created.json() == create_retry.json() == expected_created
+    assert current_before.json() == {'session_id': session_id}
+    assert closed.status_code == 200
+    assert close_retry.status_code == 200
+    assert closed.json() == close_retry.json()
+    assert closed_create.status_code == 409
+    assert current_after.json() == {'session_id': None}
+    assert row_count == 1
+    assert persisted is not None
+    assert persisted.closed_at is not None
+
+
+async def test_explicit_create_and_close_reject_foreign_owner(
+    db_engine,
+    db_session,
+):
+    session_id = str(uuid.uuid4())
+    persisted = await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=session_id,
+            user_id='owner-1',
+            last_activity_at=datetime.now(UTC),
+        )
+    )
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        async def lifecycle_service_override():
+            async with session_factory() as request_session:
+                yield _service(request_session, checkpointer)
+
+        app.dependency_overrides[
+            get_chat_session_lifecycle_service
+        ] = lifecycle_service_override
+        limiter.reset()
+        try:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url='http://test',
+            ) as client:
+                headers = {
+                    'X-API-Key': (
+                        get_settings().app.api_key.get_secret_value()
+                    ),
+                    'X-Vera-User-ID': 'owner-2',
+                }
+                create_response = await client.post(
+                    '/api/v1/chat/sessions',
+                    headers=headers,
+                    json={'session_id': session_id},
+                )
+                close_response = await client.post(
+                    f'/api/v1/chat/sessions/{session_id}/close',
+                    headers=headers,
+                )
+        finally:
+            app.dependency_overrides.clear()
+            limiter.reset()
+
+    await db_session.refresh(persisted)
+    assert create_response.status_code == 403
+    assert close_response.status_code == 403
+    assert persisted.closed_at is None
+
+
+async def test_anonymous_session_is_assigned_on_authenticated_start_turn(
+    db_engine,
+    db_session,
+):
+    session_id = str(uuid.uuid4())
+    request_id = str(uuid.uuid4())
+    anonymous_hash = 'a' * 64
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        async def lifecycle_service_override():
+            async with session_factory() as request_session:
+                yield _service(request_session, checkpointer)
+
+        app.dependency_overrides[
+            get_chat_session_lifecycle_service
+        ] = lifecycle_service_override
+        try:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url='http://test',
+            ) as client:
+                created = await client.post(
+                    '/api/v1/chat/sessions',
+                    headers={
+                        'X-API-Key': (
+                            get_settings().app.api_key.get_secret_value()
+                        ),
+                        'X-Vera-Anonymous-Token-Hash': anonymous_hash,
+                    },
+                    json={'session_id': session_id},
+                )
+        finally:
+            app.dependency_overrides.clear()
+
+        anonymous_session = await ChatSessionRepository(
+            db_session
+        ).get_by_session_id(session_id)
+        assert anonymous_session is not None
+        await _save_completed_turn(
+            db_session,
+            anonymous_session,
+            request_id=str(uuid.uuid4()),
+        )
+        graph = _build_echo_graph().compile(checkpointer=checkpointer)
+        await graph.ainvoke(
+            _initial_state(session_id),
+            config={'configurable': {'thread_id': session_id}},
+        )
+        checkpoint = await checkpointer.aget_tuple(
+            {'configurable': {'thread_id': session_id}}
+        )
+        assert checkpoint is not None
+
+        start_result = await ChatPersistenceService(
+            ChatSessionRepository(db_session),
+            ChatTurnRepository(db_session),
+            checkpointer=checkpointer,
+            session_ttl_seconds=SESSION_TTL_SECONDS,
+        ).start_turn(
+            session_id=session_id,
+            request_id=request_id,
+            user_id='user-after-login',
+            anonymous_token_hash=anonymous_hash,
+            question='Продолжить текущий диалог',
+            worker_id='worker-1',
+            lease_seconds=900.0,
+        )
+
+    persisted = await ChatSessionRepository(db_session).get_by_session_id(
+        session_id
+    )
+    row_count = (
+        await db_session.execute(select(func.count(ChatSession.id)))
+    ).scalar_one()
+    turn_count = (
+        await db_session.execute(select(func.count(ChatTurn.id)))
+    ).scalar_one()
+    assert created.status_code == 200
+    assert start_result.outcome == START_CLAIMED
+    assert row_count == 1
+    assert turn_count == 2
+    assert persisted is not None
+    assert persisted.session_id == session_id
+    assert persisted.user_id == 'user-after-login'
+    assert persisted.anonymous_token_hash is None
 
 
 @pytest.mark.parametrize(
@@ -676,6 +916,350 @@ async def test_expired_retry_requires_same_real_anonymous_hashes(
             user_id=None,
             anonymous_token_hash=different_replacement_hash,
         )
+
+
+async def test_closed_predecessor_creates_and_exactly_retries_successor(
+    db_session,
+):
+    predecessor_id = str(uuid.uuid4())
+    successor_id = str(uuid.uuid4())
+    original_closed_at = datetime.now(UTC) - timedelta(minutes=1)
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=predecessor_id,
+            user_id='user-1',
+            last_activity_at=datetime.now(UTC),
+            closed_at=original_closed_at,
+        )
+    )
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        service = _service(db_session, checkpointer)
+        first = await service.resolve_session(
+            session_id=predecessor_id,
+            replacement_session_id=successor_id,
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+        retry = await service.resolve_session(
+            session_id=predecessor_id,
+            replacement_session_id=successor_id,
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+
+    predecessor = await ChatSessionRepository(
+        db_session
+    ).get_by_session_id(predecessor_id)
+    successor = await ChatSessionRepository(db_session).get_by_session_id(
+        successor_id
+    )
+    row_count = (
+        await db_session.execute(select(func.count(ChatSession.id)))
+    ).scalar_one()
+
+    assert first.boundary == retry.boundary == 'expired'
+    assert first.session_id == retry.session_id == successor_id
+    assert row_count == 2
+    assert predecessor is not None
+    assert predecessor.closed_at == original_closed_at
+    assert (
+        predecessor.service_metadata[SUCCESSOR_SESSION_ID_METADATA_KEY]
+        == successor_id
+    )
+    assert successor is not None
+    assert successor.closed_at is None
+
+
+async def test_closed_predecessor_reuses_existing_open_owned_successor(
+    db_session,
+):
+    predecessor_id = str(uuid.uuid4())
+    successor_id = str(uuid.uuid4())
+    previous_successor_activity = datetime.now(UTC) - timedelta(days=2)
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=predecessor_id,
+            anonymous_token_hash='a' * 64,
+            last_activity_at=datetime.now(UTC),
+            closed_at=datetime.now(UTC),
+        )
+    )
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=successor_id,
+            anonymous_token_hash='c' * 64,
+            last_activity_at=previous_successor_activity,
+        )
+    )
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        result = await _service(
+            db_session,
+            checkpointer,
+        ).resolve_session(
+            session_id=predecessor_id,
+            replacement_session_id=successor_id,
+            user_id=None,
+            anonymous_token_hash='a' * 64,
+            refreshed_anonymous_token_hash='b' * 64,
+            replacement_anonymous_token_hash='c' * 64,
+        )
+
+    predecessor = await ChatSessionRepository(
+        db_session
+    ).get_by_session_id(predecessor_id)
+    successor = await ChatSessionRepository(db_session).get_by_session_id(
+        successor_id
+    )
+    row_count = (
+        await db_session.execute(select(func.count(ChatSession.id)))
+    ).scalar_one()
+
+    assert result.boundary == 'expired'
+    assert result.session_id == successor_id
+    assert row_count == 2
+    assert predecessor is not None
+    assert (
+        predecessor.service_metadata[SUCCESSOR_SESSION_ID_METADATA_KEY]
+        == successor_id
+    )
+    assert predecessor.anonymous_token_hash == 'b' * 64
+    assert successor is not None
+    assert successor.anonymous_token_hash == 'c' * 64
+    assert successor.last_activity_at > previous_successor_activity
+    assert (
+        successor.service_metadata[
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY
+        ]
+        == predecessor_id
+    )
+
+
+async def test_closed_predecessor_rejects_wrong_successor_hash(
+    db_session,
+):
+    predecessor_id = str(uuid.uuid4())
+    successor_id = str(uuid.uuid4())
+    predecessor_closed_at = datetime.now(UTC) - timedelta(minutes=1)
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=predecessor_id,
+            anonymous_token_hash='a' * 64,
+            service_metadata={},
+            last_activity_at=datetime.now(UTC),
+            closed_at=predecessor_closed_at,
+        )
+    )
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=successor_id,
+            anonymous_token_hash='c' * 64,
+            service_metadata={},
+            last_activity_at=datetime.now(UTC),
+        )
+    )
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        with pytest.raises(ChatSessionAccessDeniedError):
+            await _service(db_session, checkpointer).resolve_session(
+                session_id=predecessor_id,
+                replacement_session_id=successor_id,
+                user_id=None,
+                anonymous_token_hash='a' * 64,
+                refreshed_anonymous_token_hash='b' * 64,
+                replacement_anonymous_token_hash='d' * 64,
+            )
+        await db_session.rollback()
+
+    predecessor = await ChatSessionRepository(
+        db_session
+    ).get_by_session_id(predecessor_id)
+    successor = await ChatSessionRepository(db_session).get_by_session_id(
+        successor_id
+    )
+    row_count = (
+        await db_session.execute(select(func.count(ChatSession.id)))
+    ).scalar_one()
+
+    assert row_count == 2
+    assert predecessor is not None
+    assert predecessor.closed_at == predecessor_closed_at
+    assert predecessor.anonymous_token_hash == 'a' * 64
+    assert SUCCESSOR_SESSION_ID_METADATA_KEY not in predecessor.service_metadata
+    assert successor is not None
+    assert successor.closed_at is None
+    assert successor.anonymous_token_hash == 'c' * 64
+    assert successor.service_metadata == {}
+
+
+@pytest.mark.parametrize(
+    (
+        'successor_owner',
+        'successor_closed',
+        'bound_predecessor_id',
+        'expected_error',
+    ),
+    [
+        pytest.param(
+            'owner-2',
+            False,
+            None,
+            ChatSessionAccessDeniedError,
+            id='foreign',
+        ),
+        pytest.param(
+            'user-1',
+            True,
+            None,
+            ChatSessionResolutionConflictError,
+            id='closed-owned',
+        ),
+        pytest.param(
+            'user-1',
+            False,
+            'session-q',
+            ChatSessionResolutionConflictError,
+            id='bound-to-another',
+        ),
+    ],
+)
+async def test_closed_predecessor_rejects_unsafe_existing_successor(
+    db_session,
+    successor_owner: str,
+    successor_closed: bool,
+    bound_predecessor_id: str | None,
+    expected_error: type[Exception],
+):
+    predecessor_id = str(uuid.uuid4())
+    successor_id = str(uuid.uuid4())
+    predecessor_closed_at = datetime.now(UTC) - timedelta(minutes=1)
+    successor_closed_at = (
+        datetime.now(UTC) if successor_closed else None
+    )
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=predecessor_id,
+            user_id='user-1',
+            service_metadata={},
+            last_activity_at=datetime.now(UTC),
+            closed_at=predecessor_closed_at,
+        )
+    )
+    successor_metadata = (
+        {
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY: (
+                bound_predecessor_id
+            )
+        }
+        if bound_predecessor_id is not None
+        else {}
+    )
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=successor_id,
+            user_id=successor_owner,
+            service_metadata=successor_metadata,
+            last_activity_at=datetime.now(UTC),
+            closed_at=successor_closed_at,
+        )
+    )
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        with pytest.raises(expected_error):
+            await _service(db_session, checkpointer).resolve_session(
+                session_id=predecessor_id,
+                replacement_session_id=successor_id,
+                user_id='user-1',
+                anonymous_token_hash=None,
+                refreshed_anonymous_token_hash=None,
+                replacement_anonymous_token_hash=None,
+            )
+        await db_session.rollback()
+
+    predecessor = await ChatSessionRepository(
+        db_session
+    ).get_by_session_id(predecessor_id)
+    successor = await ChatSessionRepository(db_session).get_by_session_id(
+        successor_id
+    )
+    row_count = (
+        await db_session.execute(select(func.count(ChatSession.id)))
+    ).scalar_one()
+
+    assert row_count == 2
+    assert predecessor is not None
+    assert predecessor.closed_at == predecessor_closed_at
+    assert SUCCESSOR_SESSION_ID_METADATA_KEY not in predecessor.service_metadata
+    assert successor is not None
+    assert successor.closed_at == successor_closed_at
+    assert successor.service_metadata == successor_metadata
+
+
+async def test_concurrent_closed_predecessor_retries_keep_one_successor(
+    db_engine,
+    db_session,
+):
+    predecessor_id = str(uuid.uuid4())
+    successor_id = str(uuid.uuid4())
+    await ChatSessionRepository(db_session).save(
+        ChatSession(
+            session_id=predecessor_id,
+            anonymous_token_hash='a' * 64,
+            last_activity_at=datetime.now(UTC),
+            closed_at=datetime.now(UTC),
+        )
+    )
+    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    async with get_redis_checkpointer(_redis_settings()) as checkpointer:
+        async def resolve_once():
+            async with session_factory() as request_session:
+                return await _service(
+                    request_session,
+                    checkpointer,
+                ).resolve_session(
+                    session_id=predecessor_id,
+                    replacement_session_id=successor_id,
+                    user_id=None,
+                    anonymous_token_hash='a' * 64,
+                    refreshed_anonymous_token_hash='b' * 64,
+                    replacement_anonymous_token_hash='c' * 64,
+                )
+
+        first, second = await asyncio.gather(
+            resolve_once(),
+            resolve_once(),
+        )
+
+    async with session_factory() as verification_session:
+        row_count = (
+            await verification_session.execute(
+                select(func.count(ChatSession.id))
+            )
+        ).scalar_one()
+        predecessor = await ChatSessionRepository(
+            verification_session
+        ).get_by_session_id(predecessor_id)
+        successor = await ChatSessionRepository(
+            verification_session
+        ).get_by_session_id(successor_id)
+
+    assert first.boundary == second.boundary == 'expired'
+    assert first.session_id == second.session_id == successor_id
+    assert row_count == 2
+    assert predecessor is not None
+    assert (
+        predecessor.service_metadata[SUCCESSOR_SESSION_ID_METADATA_KEY]
+        == successor_id
+    )
+    assert predecessor.anonymous_token_hash == 'b' * 64
+    assert successor is not None
+    assert successor.anonymous_token_hash == 'c' * 64
 
 
 async def test_concurrent_exact_expiry_retries_keep_one_successor_and_hashes(

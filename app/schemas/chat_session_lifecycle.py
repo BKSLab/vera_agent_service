@@ -1,6 +1,51 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class CreateChatSessionRequest(BaseModel):
+    """Тело явного создания новой сессии диалога."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            'example': {'session_id': 'new-conversation-uuid'}
+        }
+    )
+
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description='Клиентский уникальный идентификатор новой сессии.',
+    )
+
+
+class CreateChatSessionResponse(BaseModel):
+    """Результат явного создания или идемпотентного повтора."""
+
+    session_id: str = Field(
+        ...,
+        description='Идентификатор созданной открытой сессии.',
+    )
+    session_ttl_seconds: int = Field(
+        ...,
+        gt=0,
+        description='Единый TTL неактивности PostgreSQL и Redis.',
+    )
+
+
+class CloseChatSessionResponse(BaseModel):
+    """Результат явного идемпотентного закрытия сессии."""
+
+    session_id: str = Field(
+        ...,
+        description='Идентификатор закрытой сессии.',
+    )
+    closed_at: datetime = Field(
+        ...,
+        description='Сохранённый момент закрытия сессии.',
+    )
 
 
 class ResolveChatSessionRequest(BaseModel):

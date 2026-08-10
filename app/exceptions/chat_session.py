@@ -43,6 +43,13 @@ class ChatSessionInactiveError(ChatSessionAccessDeniedError):
     detail = 'Сессия закрыта или истекла. Начните новый диалог.'
 
 
+class ChatSessionAlreadyClosedError(Exception):
+    """Явное создание указало уже закрытый идентификатор сессии."""
+
+    status_code = status.HTTP_409_CONFLICT
+    detail = 'Сессия уже закрыта. Используйте новый идентификатор.'
+
+
 class ChatSessionResolutionConflictError(Exception):
     """Повтор lifecycle-запроса не совпал с сохранённым successor."""
 

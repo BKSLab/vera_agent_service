@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import httpx
@@ -6,10 +7,16 @@ import pytest
 from app.core.rate_limit import limiter
 from app.core.settings import get_settings
 from app.dependencies.services import get_chat_session_lifecycle_service
-from app.exceptions.chat_session import ChatSessionAccessDeniedError
+from app.exceptions.chat_session import (
+    ChatSessionAccessDeniedError,
+    ChatSessionAlreadyClosedError,
+    ChatSessionNotFoundError,
+)
 from app.main import app
 from app.services.chat_session_lifecycle import (
     BOUNDARY_RETAINED,
+    ChatSessionClosure,
+    ChatSessionCreation,
     ChatSessionLifecycleService,
     ChatSessionResolution,
 )
@@ -115,3 +122,140 @@ async def test_resolve_chat_session_endpoint_rejects_same_replacement_id():
 
     assert response.status_code == 422
     service.resolve_session.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_chat_session_endpoint_returns_contract_and_headers():
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.create_session.return_value = ChatSessionCreation(
+        session_id='session-1',
+        session_ttl_seconds=86400,
+    )
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.post(
+            '/api/v1/chat/sessions',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'user-1',
+                'X-Vera-Anonymous-Token-Hash': 'a' * 64,
+            },
+            json={'session_id': 'session-1'},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'session_id': 'session-1',
+        'session_ttl_seconds': 86400,
+    }
+    service.create_session.assert_awaited_once_with(
+        session_id='session-1',
+        user_id='user-1',
+        anonymous_token_hash='a' * 64,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_chat_session_endpoint_maps_closed_conflict_to_409():
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.create_session.side_effect = ChatSessionAlreadyClosedError
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.post(
+            '/api/v1/chat/sessions',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'user-1',
+            },
+            json={'session_id': 'session-1'},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        'detail': 'Сессия уже закрыта. Используйте новый идентификатор.'
+    }
+
+
+@pytest.mark.asyncio
+async def test_close_chat_session_endpoint_returns_persisted_closed_at():
+    closed_at = datetime.now(UTC)
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.close_session.return_value = ChatSessionClosure(
+        session_id='session-1',
+        closed_at=closed_at,
+    )
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.post(
+            '/api/v1/chat/sessions/session-1/close',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-Anonymous-Token-Hash': 'a' * 64,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        'session_id': 'session-1',
+        'closed_at': closed_at.isoformat().replace('+00:00', 'Z'),
+    }
+    service.close_session.assert_awaited_once_with(
+        session_id='session-1',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ('service_error', 'expected_status'),
+    [
+        (ChatSessionNotFoundError('missing-session'), 404),
+        (ChatSessionAccessDeniedError(), 403),
+    ],
+)
+async def test_close_chat_session_endpoint_maps_owner_and_missing_errors(
+    service_error: Exception,
+    expected_status: int,
+):
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.close_session.side_effect = service_error
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.post(
+            '/api/v1/chat/sessions/session-1/close',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+                'X-Vera-User-ID': 'user-1',
+            },
+        )
+
+    assert response.status_code == expected_status

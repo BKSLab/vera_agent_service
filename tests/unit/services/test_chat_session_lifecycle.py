@@ -8,6 +8,8 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from app.db.models.chat_session import ChatSession
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
+    ChatSessionAlreadyClosedError,
+    ChatSessionNotFoundError,
     ChatSessionResolutionConflictError,
 )
 from app.repositories.chat_session import ChatSessionRepository
@@ -40,6 +42,245 @@ def _service(
         checkpointer=checkpointer,
         session_ttl_seconds=86400,
     )
+
+
+@pytest.mark.asyncio
+async def test_create_session_creates_missing_anonymous_session():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        anonymous_token_hash='a' * 64,
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.return_value = (
+        chat_session,
+        True,
+    )
+
+    result = await _service(
+        session_repository,
+        turn_repository,
+        checkpointer,
+    ).create_session(
+        session_id='session-1',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
+    )
+
+    assert result.session_id == 'session-1'
+    assert result.session_ttl_seconds == 86400
+    session_repository.commit_lifecycle_changes.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_create_session_returns_owned_open_session_on_retry():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.return_value = (
+        chat_session,
+        False,
+    )
+
+    result = await _service(
+        session_repository,
+        turn_repository,
+        checkpointer,
+    ).create_session(
+        session_id='session-1',
+        user_id='user-1',
+        anonymous_token_hash=None,
+    )
+
+    assert result.session_id == 'session-1'
+    session_repository.commit_lifecycle_changes.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_owned_closed_session():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.return_value = (
+        chat_session,
+        False,
+    )
+
+    with pytest.raises(ChatSessionAlreadyClosedError) as exc_info:
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).create_session(
+            session_id='session-1',
+            user_id='user-1',
+            anonymous_token_hash=None,
+        )
+
+    assert exc_info.value.status_code == 409
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_session_rejects_foreign_existing_session():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='owner-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.return_value = (
+        chat_session,
+        False,
+    )
+
+    with pytest.raises(ChatSessionAccessDeniedError) as exc_info:
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).create_session(
+            session_id='session-1',
+            user_id='owner-2',
+            anonymous_token_hash=None,
+        )
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_close_session_sets_closed_at_for_owner():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        anonymous_token_hash='a' * 64,
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_by_session_id.return_value = chat_session
+
+    result = await _service(
+        session_repository,
+        turn_repository,
+        checkpointer,
+    ).close_session(
+        session_id='session-1',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
+    )
+
+    assert result.session_id == 'session-1'
+    assert result.closed_at == chat_session.closed_at
+    assert result.closed_at is not None
+    session_repository.commit_lifecycle_changes.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_close_session_keeps_original_closed_at_on_retry():
+    original_closed_at = datetime.now(UTC) - timedelta(minutes=1)
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=original_closed_at,
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_by_session_id.return_value = chat_session
+
+    result = await _service(
+        session_repository,
+        turn_repository,
+        checkpointer,
+    ).close_session(
+        session_id='session-1',
+        user_id='user-1',
+        anonymous_token_hash=None,
+    )
+
+    assert result.closed_at == original_closed_at
+    assert chat_session.closed_at == original_closed_at
+    session_repository.commit_lifecycle_changes.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_close_session_raises_not_found_for_missing_session():
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_by_session_id.return_value = None
+
+    with pytest.raises(ChatSessionNotFoundError) as exc_info:
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).close_session(
+            session_id='missing-session',
+            user_id='user-1',
+            anonymous_token_hash=None,
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_close_session_rejects_foreign_owner():
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-1',
+        user_id='owner-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_by_session_id.return_value = chat_session
+
+    with pytest.raises(ChatSessionAccessDeniedError) as exc_info:
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).close_session(
+            session_id='session-1',
+            user_id='owner-2',
+            anonymous_token_hash=None,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert chat_session.closed_at is None
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -449,6 +690,443 @@ async def test_get_current_user_session_refreshes_active_candidate():
     checkpointer.aget_tuple.assert_awaited_once_with(
         {'configurable': {'thread_id': 'session-1'}}
     )
+
+
+@pytest.mark.asyncio
+async def test_closed_predecessor_creates_and_retries_exact_successor():
+    original_closed_at = datetime.now(UTC) - timedelta(minutes=1)
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=original_closed_at,
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, True),
+        (predecessor, False),
+    ]
+    session_repository.lock_by_session_id.return_value = successor
+    service = _service(session_repository, turn_repository, checkpointer)
+
+    first = await service.resolve_session(
+        session_id='session-p',
+        replacement_session_id='session-n',
+        user_id='user-1',
+        anonymous_token_hash=None,
+        refreshed_anonymous_token_hash=None,
+        replacement_anonymous_token_hash=None,
+    )
+    retry = await service.resolve_session(
+        session_id='session-p',
+        replacement_session_id='session-n',
+        user_id='user-1',
+        anonymous_token_hash=None,
+        refreshed_anonymous_token_hash=None,
+        replacement_anonymous_token_hash=None,
+    )
+
+    assert first.boundary == retry.boundary == 'expired'
+    assert first.session_id == retry.session_id == 'session-n'
+    assert predecessor.closed_at == original_closed_at
+    assert (
+        predecessor.service_metadata[SUCCESSOR_SESSION_ID_METADATA_KEY]
+        == 'session-n'
+    )
+    assert (
+        successor.service_metadata[
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY
+        ]
+        == 'session-p'
+    )
+    assert session_repository.commit_lifecycle_changes.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_closed_predecessor_reuses_open_owned_successor():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    previous_successor_activity = datetime.now(UTC) - timedelta(days=2)
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=previous_successor_activity,
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    result = await _service(
+        session_repository,
+        turn_repository,
+        checkpointer,
+    ).resolve_session(
+        session_id='session-p',
+        replacement_session_id='session-n',
+        user_id='user-1',
+        anonymous_token_hash=None,
+        refreshed_anonymous_token_hash=None,
+        replacement_anonymous_token_hash=None,
+    )
+
+    assert result.boundary == 'expired'
+    assert result.session_id == 'session-n'
+    assert (
+        predecessor.service_metadata[SUCCESSOR_SESSION_ID_METADATA_KEY]
+        == 'session-n'
+    )
+    assert (
+        successor.service_metadata[
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY
+        ]
+        == 'session-p'
+    )
+    assert successor.last_activity_at > previous_successor_activity
+    session_repository.commit_lifecycle_changes.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_closed_anonymous_predecessor_reuses_exact_owned_successor():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        anonymous_token_hash='a' * 64,
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        anonymous_token_hash='c' * 64,
+        service_metadata={},
+        last_activity_at=datetime.now(UTC) - timedelta(days=2),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    result = await _service(
+        session_repository,
+        turn_repository,
+        checkpointer,
+    ).resolve_session(
+        session_id='session-p',
+        replacement_session_id='session-n',
+        user_id=None,
+        anonymous_token_hash='a' * 64,
+        refreshed_anonymous_token_hash='b' * 64,
+        replacement_anonymous_token_hash='c' * 64,
+    )
+
+    assert result.boundary == 'expired'
+    assert predecessor.anonymous_token_hash == 'b' * 64
+    assert successor.anonymous_token_hash == 'c' * 64
+    assert (
+        predecessor.service_metadata[SUCCESSOR_SESSION_ID_METADATA_KEY]
+        == 'session-n'
+    )
+
+
+@pytest.mark.asyncio
+async def test_closed_anonymous_predecessor_rejects_wrong_successor_hash():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        anonymous_token_hash='a' * 64,
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        anonymous_token_hash='c' * 64,
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    with pytest.raises(ChatSessionAccessDeniedError):
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).resolve_session(
+            session_id='session-p',
+            replacement_session_id='session-n',
+            user_id=None,
+            anonymous_token_hash='a' * 64,
+            refreshed_anonymous_token_hash='b' * 64,
+            replacement_anonymous_token_hash='d' * 64,
+        )
+
+    assert SUCCESSOR_SESSION_ID_METADATA_KEY not in predecessor.service_metadata
+    assert successor.anonymous_token_hash == 'c' * 64
+    assert successor.service_metadata == {}
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_open_inactive_predecessor_rejects_existing_owned_successor():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC) - timedelta(days=2),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    with pytest.raises(ChatSessionResolutionConflictError):
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).resolve_session(
+            session_id='session-p',
+            replacement_session_id='session-n',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+
+    assert predecessor.closed_at is None
+    assert predecessor.service_metadata == {}
+    assert successor.service_metadata == {}
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_predecessor_rejects_foreign_existing_successor():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='owner-2',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    with pytest.raises(ChatSessionAccessDeniedError):
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).resolve_session(
+            session_id='session-p',
+            replacement_session_id='session-n',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+
+    assert predecessor.service_metadata == {}
+    assert successor.service_metadata == {}
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_predecessor_rejects_closed_owned_successor():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    with pytest.raises(ChatSessionResolutionConflictError):
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).resolve_session(
+            session_id='session-p',
+            replacement_session_id='session-n',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+
+    assert predecessor.service_metadata == {}
+    assert successor.service_metadata == {}
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_predecessor_rejects_successor_bound_to_another():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={},
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='user-1',
+        service_metadata={
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY: 'session-q',
+        },
+        last_activity_at=datetime.now(UTC),
+    )
+    original_successor_metadata = dict(successor.service_metadata)
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.side_effect = [
+        (predecessor, False),
+        (successor, False),
+    ]
+
+    with pytest.raises(ChatSessionResolutionConflictError):
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).resolve_session(
+            session_id='session-p',
+            replacement_session_id='session-n',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+
+    assert predecessor.service_metadata == {}
+    assert successor.service_metadata == original_successor_metadata
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exact_retry_rejects_successor_closed_after_binding():
+    predecessor = ChatSession(
+        id=uuid4(),
+        session_id='session-p',
+        user_id='user-1',
+        service_metadata={
+            SUCCESSOR_SESSION_ID_METADATA_KEY: 'session-n',
+        },
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    successor = ChatSession(
+        id=uuid4(),
+        session_id='session-n',
+        user_id='user-1',
+        service_metadata={
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY: 'session-p',
+        },
+        last_activity_at=datetime.now(UTC),
+        closed_at=datetime.now(UTC),
+    )
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    session_repository.lock_or_create_for_lifecycle.return_value = (
+        predecessor,
+        False,
+    )
+    session_repository.lock_by_session_id.return_value = successor
+
+    with pytest.raises(ChatSessionResolutionConflictError):
+        await _service(
+            session_repository,
+            turn_repository,
+            checkpointer,
+        ).resolve_session(
+            session_id='session-p',
+            replacement_session_id='session-n',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            refreshed_anonymous_token_hash=None,
+            replacement_anonymous_token_hash=None,
+        )
+
+    session_repository.commit_lifecycle_changes.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,8 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from app.db.models.chat_session import ChatSession
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
+    ChatSessionAlreadyClosedError,
+    ChatSessionNotFoundError,
     ChatSessionRepositoryError,
     ChatSessionResolutionConflictError,
     ChatSessionServiceError,
@@ -48,6 +50,22 @@ class ChatSessionResolution:
     session_ttl_seconds: int
 
 
+@dataclass(frozen=True)
+class ChatSessionCreation:
+    """Результат явного создания открытой сессии."""
+
+    session_id: str
+    session_ttl_seconds: int
+
+
+@dataclass(frozen=True)
+class ChatSessionClosure:
+    """Результат явного закрытия сессии."""
+
+    session_id: str
+    closed_at: datetime
+
+
 class ChatSessionLifecycleService:
     """Согласует PostgreSQL-сессию с живым Redis-контекстом."""
 
@@ -64,6 +82,112 @@ class ChatSessionLifecycleService:
         self.chat_turn_repository = chat_turn_repository
         self.checkpointer = checkpointer
         self.session_ttl_seconds = session_ttl_seconds
+
+    async def create_session(
+        self,
+        *,
+        session_id: str,
+        user_id: str | None,
+        anonymous_token_hash: str | None,
+    ) -> ChatSessionCreation:
+        """Явно создаёт сессию с идемпотентным retry для владельца.
+
+        Args:
+            session_id: Клиентский уникальный идентификатор новой сессии.
+            user_id: Идентификатор авторизованного владельца.
+            anonymous_token_hash: Доказательство anonymous-владельца.
+
+        Returns:
+            Идентификатор открытой сессии и единый TTL.
+
+        Raises:
+            ChatSessionAccessDeniedError: Владелец не подтверждён.
+            ChatSessionAlreadyClosedError: Owned ID уже закрыт.
+            ChatSessionServiceError: PostgreSQL недоступен.
+        """
+        if user_id is None and anonymous_token_hash is None:
+            raise ChatSessionAccessDeniedError
+
+        try:
+            chat_session, created = (
+                await self.chat_session_repository.lock_or_create_for_lifecycle(
+                    session_id=session_id,
+                    user_id=user_id,
+                    anonymous_token_hash=anonymous_token_hash,
+                )
+            )
+            if not created:
+                ensure_chat_session_access(
+                    chat_session,
+                    user_id=user_id,
+                    anonymous_token_hash=anonymous_token_hash,
+                )
+                if chat_session.closed_at is not None:
+                    raise ChatSessionAlreadyClosedError
+
+            await self.chat_session_repository.commit_lifecycle_changes()
+            return ChatSessionCreation(
+                session_id=chat_session.session_id,
+                session_ttl_seconds=self.session_ttl_seconds,
+            )
+        except (
+            ChatSessionAccessDeniedError,
+            ChatSessionAlreadyClosedError,
+        ):
+            raise
+        except ChatSessionRepositoryError as error:
+            raise ChatSessionServiceError from error
+
+    async def close_session(
+        self,
+        *,
+        session_id: str,
+        user_id: str | None,
+        anonymous_token_hash: str | None,
+    ) -> ChatSessionClosure:
+        """Явно и идемпотентно закрывает owned-сессию.
+
+        Args:
+            session_id: Идентификатор закрываемой сессии.
+            user_id: Идентификатор авторизованного владельца.
+            anonymous_token_hash: Доказательство anonymous-владельца.
+
+        Returns:
+            Идентификатор и сохранённый момент закрытия.
+
+        Raises:
+            ChatSessionNotFoundError: Сессия не существует.
+            ChatSessionAccessDeniedError: Владелец не подтверждён.
+            ChatSessionServiceError: PostgreSQL недоступен.
+        """
+        try:
+            chat_session = (
+                await self.chat_session_repository.lock_by_session_id(
+                    session_id
+                )
+            )
+            if chat_session is None:
+                raise ChatSessionNotFoundError(session_id)
+            ensure_chat_session_access(
+                chat_session,
+                user_id=user_id,
+                anonymous_token_hash=anonymous_token_hash,
+            )
+            chat_session.closed_at = (
+                chat_session.closed_at or datetime.now(UTC)
+            )
+            await self.chat_session_repository.commit_lifecycle_changes()
+            return ChatSessionClosure(
+                session_id=chat_session.session_id,
+                closed_at=chat_session.closed_at,
+            )
+        except (
+            ChatSessionAccessDeniedError,
+            ChatSessionNotFoundError,
+        ):
+            raise
+        except ChatSessionRepositoryError as error:
+            raise ChatSessionServiceError from error
 
     async def resolve_session(
         self,
@@ -120,6 +244,7 @@ class ChatSessionLifecycleService:
                     refreshed_anonymous_token_hash
                 ),
             )
+            predecessor_was_already_closed = current.closed_at is not None
             if not previous_proof_retry:
                 self._clear_successor_recovery(current)
             now = datetime.now(UTC)
@@ -156,6 +281,9 @@ class ChatSessionLifecycleService:
                 user_id=user_id,
                 replacement_anonymous_token_hash=(
                     replacement_anonymous_token_hash
+                ),
+                predecessor_was_already_closed=(
+                    predecessor_was_already_closed
                 ),
                 now=now,
             )
@@ -337,6 +465,7 @@ class ChatSessionLifecycleService:
         replacement_session_id: str,
         user_id: str | None,
         replacement_anonymous_token_hash: str | None,
+        predecessor_was_already_closed: bool,
         now: datetime,
     ) -> ChatSession:
         """Закрывает current и подготавливает единственный successor."""
@@ -366,6 +495,8 @@ class ChatSessionLifecycleService:
                 ),
                 now=now,
             )
+            if successor.closed_at is not None:
+                raise ChatSessionResolutionConflictError
             return successor
 
         successor, created = (
@@ -376,7 +507,17 @@ class ChatSessionLifecycleService:
             )
         )
         if not created:
-            raise ChatSessionResolutionConflictError
+            if not predecessor_was_already_closed:
+                raise ChatSessionResolutionConflictError
+            self._ensure_reusable_explicit_successor(
+                successor,
+                predecessor_session_id=current.session_id,
+                user_id=user_id,
+                replacement_anonymous_token_hash=(
+                    replacement_anonymous_token_hash
+                ),
+            )
+            successor.last_activity_at = now
 
         current.closed_at = current.closed_at or now
         metadata[SUCCESSOR_SESSION_ID_METADATA_KEY] = successor.session_id
@@ -390,6 +531,31 @@ class ChatSessionLifecycleService:
         ).timestamp()
         successor.service_metadata = successor_metadata
         return successor
+
+    def _ensure_reusable_explicit_successor(
+        self,
+        successor: ChatSession,
+        *,
+        predecessor_session_id: str,
+        user_id: str | None,
+        replacement_anonymous_token_hash: str | None,
+    ) -> None:
+        """Проверяет open owned successor потерянного explicit-create."""
+        ensure_chat_session_access(
+            successor,
+            user_id=user_id,
+            anonymous_token_hash=replacement_anonymous_token_hash,
+        )
+        if successor.closed_at is not None:
+            raise ChatSessionResolutionConflictError
+        recovery_predecessor_id = successor.service_metadata.get(
+            SUCCESSOR_RECOVERY_PREDECESSOR_ID_METADATA_KEY
+        )
+        if recovery_predecessor_id not in {
+            None,
+            predecessor_session_id,
+        }:
+            raise ChatSessionResolutionConflictError
 
     def _recover_successor_access(
         self,
