@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,6 +13,9 @@ from sqlalchemy import text
 
 from app.admin import create_admin
 from app.api.v1.endpoints.chat_history import router as chat_history_router
+from app.api.v1.endpoints.chat_session_lifecycle import (
+    router as chat_session_lifecycle_router,
+)
 from app.api.v1.endpoints.health import create_health_router
 from app.api.v1.endpoints.message_feedback import router as message_feedback_router
 from app.api.v1.endpoints.session_feedback import router as session_feedback_router
@@ -105,6 +109,7 @@ async def lifespan(app: FastAPI):
                 stack.enter_async_context(get_redis_checkpointer(settings.redis)),
                 timeout=STARTUP_TIMEOUT_SECONDS,
             )
+            app.state.checkpointer = checkpointer
             logger.info('✅ Redis checkpointer готов')
 
             redis_health_client = Redis.from_url(settings.redis.url_connect)
@@ -135,7 +140,10 @@ async def lifespan(app: FastAPI):
                 dlq_name=settings.rabbitmq.rabbitmq_dlq,
                 graph=graph,
                 token_sink=session_bus.publish,
-                persistence_service_factory=build_chat_persistence_service,
+                persistence_service_factory=partial(
+                    build_chat_persistence_service,
+                    checkpointer=checkpointer,
+                ),
                 lease_seconds=settings.rabbitmq.turn_lease_seconds,
                 trace_content_enabled=settings.observability.trace_content_enabled,
             )
@@ -176,5 +184,6 @@ app.include_router(
     )
 )
 app.include_router(chat_history_router, prefix='/api/v1')
+app.include_router(chat_session_lifecycle_router, prefix='/api/v1')
 app.include_router(message_feedback_router, prefix='/api/v1')
 app.include_router(session_feedback_router, prefix='/api/v1')

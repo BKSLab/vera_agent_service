@@ -1,12 +1,19 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+from app.core.settings import get_settings
+from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import (
     STATUS_PROCESSING,
     TERMINAL_STATUSES,
     ChatTurn,
 )
-from app.exceptions.chat_session import ChatSessionRepositoryError
+from app.exceptions.chat_session import (
+    ChatSessionInactiveError,
+    ChatSessionRepositoryError,
+)
 from app.exceptions.chat_turn import (
     ChatPersistenceServiceError,
     ChatTurnAlreadyExistsError,
@@ -15,8 +22,11 @@ from app.exceptions.chat_turn import (
 )
 from app.repositories.chat_session import ChatSessionRepository
 from app.repositories.chat_turn import ChatTurnRepository
-from app.services.chat_session_access import ensure_chat_session_access
-
+from app.services.chat_session_access import (
+    ensure_chat_session_access,
+    is_chat_session_active_in_database,
+)
+from app.services.chat_session_context import has_live_chat_session_context
 
 START_CLAIMED = 'claimed'
 """Реплика создана или перезахвачена после истёкшей аренды — обрабатываем."""
@@ -45,9 +55,19 @@ class ChatPersistenceService:
         self,
         chat_session_repository: ChatSessionRepository,
         chat_turn_repository: ChatTurnRepository,
+        checkpointer: AsyncRedisSaver | None = None,
+        session_ttl_seconds: int | None = None,
     ):
         self.chat_session_repository = chat_session_repository
         self.chat_turn_repository = chat_turn_repository
+        self.checkpointer = checkpointer
+        self.session_ttl_seconds = (
+            session_ttl_seconds
+            if session_ttl_seconds is not None
+            else get_settings().redis.redis_session_ttl_seconds
+        )
+        if self.session_ttl_seconds <= 0:
+            raise ValueError('TTL сессии должен быть положительным')
 
     async def start_turn(
         self,
@@ -89,6 +109,7 @@ class ChatPersistenceService:
                 user_id=user_id,
                 anonymous_token_hash=anonymous_token_hash,
             )
+            await self._ensure_active_session(chat_session)
             if chat_session.user_id is None and user_id is not None:
                 chat_session.user_id = user_id
                 chat_session.anonymous_token_hash = None
@@ -130,6 +151,36 @@ class ChatPersistenceService:
             )
         except (ChatSessionRepositoryError, ChatTurnRepositoryError) as error:
             raise ChatPersistenceServiceError from error
+
+    async def _ensure_active_session(
+        self,
+        chat_session: ChatSession,
+    ) -> None:
+        """Запрещает новую реплику после серверной границы контекста."""
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=self.session_ttl_seconds)
+        is_active = is_chat_session_active_in_database(
+            chat_session,
+            cutoff=cutoff,
+        )
+        if is_active and self.checkpointer is not None:
+            try:
+                is_active = await has_live_chat_session_context(
+                    chat_session,
+                    active_at=now,
+                    chat_turn_repository=self.chat_turn_repository,
+                    checkpointer=self.checkpointer,
+                )
+            except ChatTurnRepositoryError:
+                raise
+            except Exception as error:
+                raise ChatPersistenceServiceError from error
+
+        if is_active:
+            return
+        chat_session.closed_at = chat_session.closed_at or now
+        await self.chat_session_repository.commit_lifecycle_changes()
+        raise ChatSessionInactiveError
 
     async def _resolve_existing_turn(
         self,

@@ -18,7 +18,6 @@ from app.db.models.message_feedback import MessageFeedback
 from app.db.models.session_feedback import SessionFeedback
 from app.exceptions.chat_turn import ChatTurnAlreadyExistsError, ChatTurnRepositoryError
 
-
 REQUEST_ID_CONSTRAINT = 'uq_vera_chat_turns_request_id'
 
 
@@ -44,6 +43,14 @@ class RankedChatTurn:
 
     chat_turn: ChatTurn
     rank: float
+
+
+@dataclass(frozen=True)
+class ChatSessionTurnState:
+    """Aggregate-состояние реплик для проверки живого контекста."""
+
+    has_turns: bool
+    has_live_processing_turn: bool
 
 
 class ChatTurnRepository:
@@ -102,6 +109,33 @@ class ChatTurnRepository:
                 )
             ).scalar_one()
             return (current_max or 0) + 1
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatTurnRepositoryError(str(error)) from error
+
+    async def get_session_turn_state(
+        self,
+        chat_session_id: UUID,
+        *,
+        active_at: datetime,
+    ) -> ChatSessionTurnState:
+        """Возвращает aggregate истории и processing с живой арендой."""
+        try:
+            result = await self.db_session.execute(
+                select(
+                    func.count(ChatTurn.id),
+                    func.count(ChatTurn.id).filter(
+                        ChatTurn.status == STATUS_PROCESSING,
+                        ChatTurn.lease_until.is_not(None),
+                        ChatTurn.lease_until >= active_at,
+                    ),
+                ).where(ChatTurn.chat_session_id == chat_session_id)
+            )
+            turn_count, processing_count = result.one()
+            return ChatSessionTurnState(
+                has_turns=turn_count > 0,
+                has_live_processing_turn=processing_count > 0,
+            )
         except SQLAlchemyError as error:
             await self.db_session.rollback()
             raise ChatTurnRepositoryError(str(error)) from error

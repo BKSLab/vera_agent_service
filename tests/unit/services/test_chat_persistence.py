@@ -1,13 +1,21 @@
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
 from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import STATUS_GENERATION_FAILED, ChatTurn
-from app.exceptions.chat_session import ChatSessionAccessDeniedError
+from app.exceptions.chat_session import (
+    ChatSessionAccessDeniedError,
+    ChatSessionInactiveError,
+)
 from app.repositories.chat_session import ChatSessionRepository
-from app.repositories.chat_turn import ChatTurnRepository
+from app.repositories.chat_turn import (
+    ChatSessionTurnState,
+    ChatTurnRepository,
+)
 from app.services.chat_persistence import (
     START_CLAIMED,
     START_DUPLICATE_TERMINAL,
@@ -23,6 +31,7 @@ async def test_start_turn_creates_session_and_processing_turn():
         id=uuid4(),
         session_id='session-1',
         user_id='user-1',
+        last_activity_at=datetime.now(UTC),
     )
     session_repository.lock_or_create_for_turn.return_value = saved_session
     session_repository.touch_for_turn.return_value = saved_session
@@ -55,6 +64,7 @@ async def test_start_turn_returns_completed_turn_without_creating_duplicate():
         id=uuid4(),
         session_id='session-1',
         anonymous_token_hash='a' * 64,
+        closed_at=datetime.now(UTC),
     )
     turn_repository.get_by_request_id.return_value = ChatTurn(
         id=uuid4(),
@@ -106,6 +116,136 @@ async def test_start_turn_rejects_wrong_anonymous_owner():
             worker_id='worker-1',
             lease_seconds=900.0,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('closed', [False, True])
+async def test_start_turn_rejects_stale_or_closed_session(closed: bool):
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-inactive',
+        user_id='user-1',
+        last_activity_at=datetime.now(UTC) - timedelta(days=2),
+        closed_at=datetime.now(UTC) if closed else None,
+    )
+    session_repository.lock_or_create_for_turn.return_value = chat_session
+    turn_repository.get_by_request_id.return_value = None
+    service = ChatPersistenceService(
+        session_repository,
+        turn_repository,
+        session_ttl_seconds=86400,
+    )
+
+    with pytest.raises(ChatSessionInactiveError):
+        await service.start_turn(
+            session_id='session-inactive',
+            request_id='request-inactive',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            question='Вопрос',
+            worker_id='worker-1',
+            lease_seconds=900.0,
+        )
+
+    assert chat_session.closed_at is not None
+    session_repository.commit_lifecycle_changes.assert_awaited_once_with()
+    turn_repository.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_rejects_without_checkpoint_or_live_lease():
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-no-context',
+        user_id='user-1',
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository.lock_or_create_for_turn.return_value = chat_session
+    turn_repository.get_by_request_id.return_value = None
+    turn_repository.get_session_turn_state.return_value = (
+        ChatSessionTurnState(
+            has_turns=True,
+            has_live_processing_turn=False,
+        )
+    )
+    checkpointer.aget_tuple.return_value = None
+    service = ChatPersistenceService(
+        session_repository,
+        turn_repository,
+        checkpointer=checkpointer,
+        session_ttl_seconds=86400,
+    )
+
+    with pytest.raises(ChatSessionInactiveError):
+        await service.start_turn(
+            session_id='session-no-context',
+            request_id='request-no-context',
+            user_id='user-1',
+            anonymous_token_hash=None,
+            question='Вопрос',
+            worker_id='worker-1',
+            lease_seconds=900.0,
+        )
+
+    assert chat_session.closed_at is not None
+    checkpointer.aget_tuple.assert_awaited_once_with(
+        {'configurable': {'thread_id': 'session-no-context'}}
+    )
+    turn_repository.save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_start_turn_allows_live_processing_window_without_checkpoint():
+    session_repository = AsyncMock(spec=ChatSessionRepository)
+    turn_repository = AsyncMock(spec=ChatTurnRepository)
+    checkpointer = AsyncMock(spec=AsyncRedisSaver)
+    chat_session = ChatSession(
+        id=uuid4(),
+        session_id='session-processing',
+        user_id='user-1',
+        last_activity_at=datetime.now(UTC),
+    )
+    session_repository.lock_or_create_for_turn.return_value = chat_session
+    session_repository.touch_for_turn.return_value = chat_session
+    turn_repository.get_by_request_id.return_value = None
+    turn_repository.get_session_turn_state.return_value = (
+        ChatSessionTurnState(
+            has_turns=True,
+            has_live_processing_turn=True,
+        )
+    )
+    turn_repository.get_next_sequence_number.return_value = 2
+    checkpointer.aget_tuple.return_value = None
+    service = ChatPersistenceService(
+        session_repository,
+        turn_repository,
+        checkpointer=checkpointer,
+        session_ttl_seconds=86400,
+    )
+
+    result = await service.start_turn(
+        session_id='session-processing',
+        request_id='request-2',
+        user_id='user-1',
+        anonymous_token_hash=None,
+        question='Второй вопрос',
+        worker_id='worker-1',
+        lease_seconds=900.0,
+    )
+
+    assert result.outcome == START_CLAIMED
+    assert chat_session.closed_at is None
+    checkpointer.aget_tuple.assert_awaited_once_with(
+        {'configurable': {'thread_id': 'session-processing'}}
+    )
+    saved_turn = turn_repository.save.await_args.args[0]
+    assert saved_turn.sequence_number == 2
+    assert saved_turn.status == 'processing'
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 
-from app.db.models.chat_session import ChatSession
 from app.db.models.chat_turn import ChatTurn
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
@@ -30,15 +29,6 @@ class ChatHistoryService:
     ):
         self.chat_session_repository = chat_session_repository
         self.chat_turn_repository = chat_turn_repository
-
-    async def get_current_session(self, user_id: str) -> ChatSession | None:
-        """Возвращает последнюю активную сессию авторизованного пользователя."""
-        try:
-            return await self.chat_session_repository.get_current_by_user_id(
-                user_id
-            )
-        except ChatSessionRepositoryError as error:
-            raise ChatSessionServiceError from error
 
     async def get_history(
         self,

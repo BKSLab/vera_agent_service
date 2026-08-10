@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.chat_session import ChatSession
 from app.exceptions.chat_session import ChatSessionRepositoryError
 
-
 SESSION_ID_CONSTRAINT = 'uq_vera_chat_sessions_session_id'
 
 
@@ -30,7 +29,7 @@ class ChatSessionRepository:
             raise ChatSessionRepositoryError(str(error)) from error
 
     async def get_current_by_user_id(self, user_id: str) -> ChatSession | None:
-        """Возвращает последнюю активную сессию пользователя."""
+        """Блокирует последнюю незакрытую сессию пользователя."""
         try:
             result = await self.db_session.execute(
                 select(ChatSession)
@@ -43,8 +42,60 @@ class ChatSessionRepository:
                     ChatSession.created_at.desc(),
                 )
                 .limit(1)
+                .with_for_update()
             )
             return result.unique().scalar_one_or_none()
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatSessionRepositoryError(str(error)) from error
+
+    async def lock_or_create_for_lifecycle(
+        self,
+        *,
+        session_id: str,
+        user_id: str | None,
+        anonymous_token_hash: str | None,
+    ) -> tuple[ChatSession, bool]:
+        """Создаёт при необходимости и блокирует сессию для lifecycle-решения."""
+        try:
+            insert_result = await self.db_session.execute(
+                insert(ChatSession)
+                .values(
+                    session_id=session_id,
+                    user_id=user_id,
+                    anonymous_token_hash=(
+                        anonymous_token_hash if user_id is None else None
+                    ),
+                )
+                .on_conflict_do_nothing(constraint=SESSION_ID_CONSTRAINT)
+            )
+            result = await self.db_session.execute(
+                select(ChatSession)
+                .where(ChatSession.session_id == session_id)
+                .with_for_update()
+            )
+            return result.unique().scalar_one(), insert_result.rowcount == 1
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatSessionRepositoryError(str(error)) from error
+
+    async def lock_by_session_id(self, session_id: str) -> ChatSession | None:
+        """Блокирует существующую сессию по внешнему идентификатору."""
+        try:
+            result = await self.db_session.execute(
+                select(ChatSession)
+                .where(ChatSession.session_id == session_id)
+                .with_for_update()
+            )
+            return result.unique().scalar_one_or_none()
+        except SQLAlchemyError as error:
+            await self.db_session.rollback()
+            raise ChatSessionRepositoryError(str(error)) from error
+
+    async def commit_lifecycle_changes(self) -> None:
+        """Атомарно фиксирует подготовленное lifecycle-изменение сессий."""
+        try:
+            await self.db_session.commit()
         except SQLAlchemyError as error:
             await self.db_session.rollback()
             raise ChatSessionRepositoryError(str(error)) from error

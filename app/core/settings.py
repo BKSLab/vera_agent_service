@@ -132,7 +132,7 @@ class RedisSettings(SettingsBase):
     redis_port: int
     redis_password: SecretStr | None = None
     redis_db: int = 0
-    redis_session_ttl_seconds: int = 86400
+    redis_session_ttl_seconds: int = Field(default=86400, gt=0)
     """TTL ключей сессии в Redis. 86400с (24 часа неактивности) — предложенное
     по умолчанию значение (AGENT_SERVICE_PLAN.md, раздел 6, открытый вопрос),
     подлежит подтверждению перед реализацией Этапа 5."""

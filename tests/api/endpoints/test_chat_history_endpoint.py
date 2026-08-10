@@ -7,13 +7,17 @@ import pytest
 
 from app.core.rate_limit import limiter
 from app.core.settings import get_settings
-from app.dependencies.services import get_chat_history_service
+from app.dependencies.services import (
+    get_chat_history_service,
+    get_chat_session_lifecycle_service,
+)
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
     ChatSessionNotFoundError,
 )
 from app.main import app
 from app.services.chat_history import ChatHistoryPage, ChatHistoryService
+from app.services.chat_session_lifecycle import ChatSessionLifecycleService
 
 
 @pytest.fixture(autouse=True)
@@ -26,11 +30,13 @@ def clear_overrides_and_limiter():
 
 @pytest.mark.asyncio
 async def test_current_chat_session_endpoint_returns_user_session():
-    service = AsyncMock(spec=ChatHistoryService)
-    service.get_current_session.return_value = SimpleNamespace(
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.get_current_user_session.return_value = SimpleNamespace(
         session_id='session-1'
     )
-    app.dependency_overrides[get_chat_history_service] = lambda: service
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(
@@ -47,14 +53,16 @@ async def test_current_chat_session_endpoint_returns_user_session():
 
     assert response.status_code == 200
     assert response.json() == {'session_id': 'session-1'}
-    service.get_current_session.assert_awaited_once_with('user-1')
+    service.get_current_user_session.assert_awaited_once_with('user-1')
 
 
 @pytest.mark.asyncio
 async def test_current_chat_session_endpoint_returns_null_for_new_user():
-    service = AsyncMock(spec=ChatHistoryService)
-    service.get_current_session.return_value = None
-    app.dependency_overrides[get_chat_history_service] = lambda: service
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.get_current_user_session.return_value = None
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(
@@ -82,9 +90,11 @@ async def test_current_chat_session_endpoint_validates_user_id_length(
     user_id_length: int,
     expected_status: int,
 ):
-    service = AsyncMock(spec=ChatHistoryService)
-    service.get_current_session.return_value = None
-    app.dependency_overrides[get_chat_history_service] = lambda: service
+    service = AsyncMock(spec=ChatSessionLifecycleService)
+    service.get_current_user_session.return_value = None
+    app.dependency_overrides[
+        get_chat_session_lifecycle_service
+    ] = lambda: service
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(

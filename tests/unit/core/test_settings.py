@@ -56,6 +56,15 @@ def test_streaming_deadline_covers_longest_tool_timeout() -> None:
     assert StreamingSettings().sse_request_deadline_seconds >= 360
 
 
+def test_redis_session_ttl_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        RedisSettings(
+            redis_host='redis.local',
+            redis_port=6379,
+            redis_session_ttl_seconds=0,
+        )
+
+
 def test_streaming_deadline_rejects_value_shorter_than_longest_tool() -> None:
     with pytest.raises(ValidationError):
         StreamingSettings(sse_request_deadline_seconds=359)

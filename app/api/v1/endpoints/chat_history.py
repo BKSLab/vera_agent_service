@@ -5,7 +5,10 @@ from fastapi import APIRouter, Header, HTTPException, Path, Query, Request, stat
 
 from app.core.rate_limit import limiter
 from app.dependencies.auth import VerifyApiKeyDep
-from app.dependencies.services import ChatHistoryServiceDep
+from app.dependencies.services import (
+    ChatHistoryServiceDep,
+    ChatSessionLifecycleServiceDep,
+)
 from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
     ChatSessionNotFoundError,
@@ -30,8 +33,9 @@ router = APIRouter(
     status_code=status.HTTP_200_OK,
     summary='Получить текущую сессию пользователя',
     description=(
-        'Возвращает последнюю активную сессию авторизованного пользователя. '
-        'Если пользователь ещё не общался с Верой, session_id равен null.'
+        'Возвращает последнюю открытую сессию авторизованного пользователя '
+        'как кандидата для обязательного resolve. Если пользователь ещё не '
+        'общался с Верой, session_id равен null.'
     ),
     operation_id='getCurrentChatSession',
     response_description='Текущая сессия пользователя.',
@@ -46,16 +50,16 @@ router = APIRouter(
 @limiter.limit('60/minute')
 async def get_current_chat_session(
     request: Request,
-    service: ChatHistoryServiceDep,
+    service: ChatSessionLifecycleServiceDep,
     user_id: Annotated[
         str,
         Header(alias='X-Vera-User-ID', min_length=1, max_length=255),
     ],
 ) -> CurrentChatSessionResponse:
-    """Возвращает сессию, которую нужно открыть пользователю."""
+    """Возвращает predecessor candidate для последующего resolve."""
     logger.info('🚀 Поиск текущей сессии пользователя.')
     try:
-        chat_session = await service.get_current_session(user_id)
+        chat_session = await service.get_current_user_session(user_id)
         return CurrentChatSessionResponse(
             session_id=(
                 chat_session.session_id if chat_session is not None else None
