@@ -5,6 +5,7 @@ from app.graph.prompts.system import (
     FINAL_RESPONSE_SYSTEM_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT_PARTS,
     SOURCES_PROMPT,
+    STYLE_PROMPT,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_PARTS,
     TOOL_USAGE_PROMPT,
@@ -114,6 +115,25 @@ def test_prompt_explains_how_to_answer_in_plain_language_on_request():
     assert 'условия, исключения, сроки и ограничения' in lowered
     assert 'не используй детский или снисходительный тон' in lowered
     assert 'не добавляй новых фактов' in lowered
+
+
+def test_style_prompt_requires_compact_answers_without_losing_legal_meaning():
+    lowered = STYLE_PROMPT.lower()
+    assert 'по умолчанию отвечай компактно' in lowered
+    assert 'не повторяй вопрос, выводы и одинаковые пояснения' in lowered
+    assert 'юридически значимые условия, исключения, сроки' in lowered
+    assert 'обязательный абзац «основание:»' in lowered
+    assert 'неточным или вводящим в заблуждение' in lowered
+
+
+def test_style_prompt_adapts_form_without_sacrificing_rag_quality():
+    lowered = STYLE_PROMPT.lower()
+    assert 'учитывай тон, уровень формальности' in lowered
+    assert 'на простой или неформальный вопрос отвечай проще' in lowered
+    assert 'на подробный или профессиональный' in lowered
+    assert 'не копируй ошибки, грубость' in lowered
+    assert 'соответствие данным базы знаний' in lowered
+    assert STYLE_PROMPT in FINAL_RESPONSE_SYSTEM_PROMPT
 
 
 def test_prompt_explicitly_forbids_markdown():
