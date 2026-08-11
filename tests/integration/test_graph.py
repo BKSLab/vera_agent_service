@@ -369,12 +369,8 @@ async def test_first_token_arrives_quickly_against_mocked_llm():
         assert (first_token_at - start) < 2.0
 
 
-async def test_consultation_email_requires_current_turn_confirmation_before_sending():
-    """VERA-021: мутирующая отправка не выполняется по одному лишь
-    намерению модели, распознанному за один шаг. Первая попытка (без
-    предшествующего запроса подтверждения) блокируется кодом; тул
-    вызывается только после явного подтверждения адреса в следующей
-    реплике пользователя."""
+async def test_consultation_email_follows_model_decision_without_confirmation_guard():
+    """Модель сама запрашивает email и вызывает тул сразу после его ввода."""
     requests: list[dict] = []
     app = create_mock_mcp_app(consultation_requests=requests)
     async with run_mock_mcp_server(app) as url:
@@ -399,9 +395,13 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
         def handler(request):
             payload = json.loads(request.content)
             if not payload.get('stream'):
-                # Модель каждый раз пытается вызвать мутирующий тул — код
-                # должен заблокировать попытку без адреса в ТЕКУЩЕМ
-                # сообщении пользователя (VERA-021).
+                last_user_message = [
+                    message
+                    for message in payload['messages']
+                    if message['role'] == 'user'
+                ][-1]['content']
+                if email not in last_user_message:
+                    return _direct_completion('Нужен email')
                 return _tool_call_completion(
                     'send_consultation_email',
                     {
@@ -410,10 +410,7 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
                         'email': email,
                     },
                 )
-            last_user_message = [m for m in payload['messages'] if m['role'] == 'user'][-1]['content']
-            if email in last_user_message:
-                return _stream_response(['Документ отправлен на ', email, '.'])
-            return _stream_response(['Подтвердите, пожалуйста, ваш email?'])
+            return _stream_response(['Укажите email для отправки консультации.'])
 
         chat_model = _build_chat_model(handler)
         graph = _compile_graph(chat_model, tools, mcp_settings)
@@ -422,14 +419,12 @@ async def test_consultation_email_requires_current_turn_confirmation_before_send
 
         assert requests == []
         assert turn1['tool_calls'] == []
-        assert turn1['messages'][-1].content == (
-            'Подтвердите, пожалуйста, адрес электронной почты и отправку консультации?'
-        )
+        assert turn1['messages'][-1].content == 'Укажите email для отправки консультации.'
 
         turn2_state = {
             'session_id': 's',
             'user_id': None,
-            'messages': [*turn1['messages'], HumanMessage(content=f'Да, {email}')],
+            'messages': [*turn1['messages'], HumanMessage(content=email)],
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
@@ -479,26 +474,14 @@ async def test_automatic_email_spans_redact_consultation_and_recipient():
                         'email': recipient,
                     },
                 )
-            last_user_message = [m for m in payload['messages'] if m['role'] == 'user'][-1]['content']
-            if recipient in last_user_message:
-                return _stream_response(['Документ отправлен.'])
-            return _stream_response(['Подтвердите, пожалуйста, ваш email?'])
+            return _stream_response(['Документ отправлен.'])
 
         chat_model = _build_chat_model(handler)
         graph = _compile_graph(chat_model, tools, mcp_settings)
 
-        # Первая попытка без предшествующего запроса подтверждения
-        # блокируется кодом (VERA-021) — тул ещё не вызывается.
-        turn1 = await graph.ainvoke(_initial_state('Отправь итоговую консультацию на почту'))
-        turn2_state = {
-            'session_id': 's',
-            'user_id': None,
-            'messages': [*turn1['messages'], HumanMessage(content=f'Да, {recipient}')],
-            'retrieved_chunks': [],
-            'tool_calls': [],
-            'search_unavailable': False,
-        }
-        await graph.ainvoke(turn2_state)
+        await graph.ainvoke(
+            _initial_state(f'Отправь итоговую консультацию на {recipient}')
+        )
 
     assert requests == [
         {

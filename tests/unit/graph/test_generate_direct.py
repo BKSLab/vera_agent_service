@@ -4,11 +4,10 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.core.settings import GraphContextSettings
 from app.graph.nodes.generate_direct import create_generate_direct_node
-from app.graph.policy import CONSULTATION_EMAIL_GUARD_NOTICE
 from tests.unit.graph._mock_llm import chat_model_with_handler, stream_response
 
 
-def _state(*, messages=None, guard_notice: str | None = None):
+def _state(*, messages=None):
     return {
         'session_id': 's',
         'user_id': None,
@@ -16,7 +15,6 @@ def _state(*, messages=None, guard_notice: str | None = None):
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
-        'consultation_email_guard_notice': guard_notice,
     }
 
 
@@ -27,23 +25,6 @@ async def test_generate_direct_returns_accumulated_streamed_answer():
     result = await node(_state())
 
     assert result['messages'][0].content == 'Здравствуйте! Чем могу помочь?'
-
-
-async def test_generate_direct_returns_guard_notice_without_calling_model():
-    called = False
-
-    def handler(request):
-        nonlocal called
-        called = True
-        return stream_response(['этого ответа быть не должно'])
-
-    chat_model = chat_model_with_handler(handler)
-    node = create_generate_direct_node(chat_model, GraphContextSettings())
-
-    result = await node(_state(guard_notice=CONSULTATION_EMAIL_GUARD_NOTICE))
-
-    assert called is False
-    assert result['messages'][0].content == CONSULTATION_EMAIL_GUARD_NOTICE
 
 
 async def test_generate_direct_formats_email_result_without_calling_model():

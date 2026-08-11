@@ -51,18 +51,10 @@ def create_generate_direct_node(
     (`context_settings`, VERA-020), не вся `state['messages']`."""
 
     async def generate_direct(state: AgentState) -> dict:
-        guard_notice = state.get('consultation_email_guard_notice')
-        if guard_notice:
-            return {
-                'messages': [AIMessage(content=guard_notice)],
-                'consultation_email_guard_notice': None,
-            }
-
         last_message = state['messages'][-1]
         if isinstance(last_message, ToolMessage):
             return {
                 'messages': [AIMessage(content=_format_consultation_email_result(last_message))],
-                'consultation_email_guard_notice': None,
             }
 
         bounded_history = build_bounded_messages(
@@ -83,12 +75,8 @@ def create_generate_direct_node(
             logger.error('Заблокирован псевдовызов инструмента в тексте финального ответа')
             return {
                 'messages': [AIMessage(content=UNSAFE_TOOL_CALL_RESPONSE)],
-                'consultation_email_guard_notice': None,
             }
 
-        return {
-            'messages': [AIMessage(content=full_text)],
-            'consultation_email_guard_notice': None,
-        }
+        return {'messages': [AIMessage(content=full_text)]}
 
     return generate_direct

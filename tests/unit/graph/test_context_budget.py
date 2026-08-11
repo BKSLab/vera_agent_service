@@ -73,3 +73,30 @@ def test_summary_is_truncated_to_max_chars_per_turn():
     summary = result[0].content
     assert len(summary.splitlines()[-1]) <= 51  # 50 символов + многоточие
     assert summary.rstrip().endswith('…')
+
+
+def test_pseudo_tool_call_in_history_is_replaced_before_model_call():
+    messages = [
+        HumanMessage(content='Отправь консультацию на user@example.com'),
+        AIMessage(content='call:default_api:send_consultation_email{email=user@example.com}'),
+        HumanMessage(content='Повтори, пожалуйста'),
+    ]
+
+    result = build_bounded_messages(messages, max_turns=5, older_turns_summary_max_chars=200)
+
+    assert result[1].content == 'Предыдущий ответ не был сформирован.'
+    assert 'call:default_api:' not in result[1].content
+
+
+def test_pseudo_tool_call_is_removed_from_old_turn_summary():
+    messages = [
+        HumanMessage(content='Первый вопрос'),
+        AIMessage(content='call:default_api:send_consultation_email{email=user@example.com}'),
+        HumanMessage(content='Последний вопрос'),
+        AIMessage(content='Обычный ответ'),
+    ]
+
+    result = build_bounded_messages(messages, max_turns=1, older_turns_summary_max_chars=200)
+
+    assert 'call:default_api:' not in result[0].content
+    assert 'Предыдущий ответ не был сформирован.' in result[0].content

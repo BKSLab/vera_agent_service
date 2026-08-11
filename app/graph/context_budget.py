@@ -11,6 +11,36 @@ LangGraph-reducer'а (`add_messages`, см. `app/graph/state.py`) и не
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
+from app.graph.policy import contains_pseudo_tool_call
+
+UNSAFE_HISTORY_ANSWER = 'Предыдущий ответ не был сформирован.'
+"""Нейтральная замена старого ответа со служебным псевдовызовом."""
+
+
+def _sanitize_message_for_model(message: BaseMessage) -> BaseMessage | None:
+    """Не даёт старому псевдовызову MCP повторно заразить контекст модели.
+
+    Такие AIMessage могли быть сохранены до включения фильтрации SSE. Их
+    нельзя передавать обратно в LLM: локальные модели часто копируют этот
+    синтаксис в новый ответ. Нативный tool-call при этом сохраняется, если
+    провайдер прислал его вместе с текстом.
+    """
+    if not isinstance(message, AIMessage) or not isinstance(message.content, str):
+        return message
+    if not contains_pseudo_tool_call(message.content):
+        return message
+    if message.tool_calls:
+        return message.model_copy(update={'content': UNSAFE_HISTORY_ANSWER})
+    return AIMessage(content=UNSAFE_HISTORY_ANSWER)
+
+
+def _sanitize_messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
+    return [
+        sanitized
+        for message in messages
+        if (sanitized := _sanitize_message_for_model(message)) is not None
+    ]
+
 
 def _split_into_turns(messages: list[BaseMessage]) -> list[list[BaseMessage]]:
     """Группирует плоский список сообщений в реплики: каждый `HumanMessage`
@@ -37,6 +67,8 @@ def _summarize_turn(turn: list[BaseMessage], max_chars: int) -> str:
     final_ai = next((m for m in reversed(turn) if isinstance(m, AIMessage)), None)
     question = human.content if human and isinstance(human.content, str) else ''
     answer = final_ai.content if final_ai and isinstance(final_ai.content, str) else ''
+    if contains_pseudo_tool_call(answer):
+        answer = UNSAFE_HISTORY_ANSWER
     summary = f'Вопрос: {question.strip()}\nОтвет: {answer.strip()}'.strip()
     if max_chars > 0 and len(summary) > max_chars:
         summary = summary[:max_chars].rstrip() + '…'
@@ -58,7 +90,7 @@ def build_bounded_messages(
     """
     turns = _split_into_turns(messages)
     if len(turns) <= max_turns:
-        return messages
+        return _sanitize_messages_for_model(messages)
 
     older_turns, recent_turns = turns[:-max_turns], turns[-max_turns:]
     summaries = [_summarize_turn(turn, older_turns_summary_max_chars) for turn in older_turns]
@@ -71,4 +103,4 @@ def build_bounded_messages(
     bounded: list[BaseMessage] = [summary_message]
     for turn in recent_turns:
         bounded.extend(turn)
-    return bounded
+    return _sanitize_messages_for_model(bounded)

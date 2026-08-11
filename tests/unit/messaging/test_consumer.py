@@ -260,6 +260,66 @@ async def test_streams_code_authored_final_message_when_model_was_not_called():
     ]
 
 
+async def test_stream_answer_emits_fallback_when_pseudo_stream_has_no_root_snapshot():
+    graph = _FakeGraph(
+        [
+            [
+                _token_event('call:default_api:'),
+                _token_event('send_consultation_email{email=user@example.com}'),
+            ]
+        ]
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Повтори отправку',
+    )
+
+    answer = ''.join(
+        [chunk async for chunk in consumer._stream_answer(payload, TurnPersistenceData())]
+    )
+
+    assert 'call:default_api:' not in answer
+    assert 'безопасный ответ' in answer
+
+
+async def test_stream_answer_uses_final_node_snapshot_with_parent_ids():
+    graph = _FakeGraph(
+        [
+            [
+                {
+                    'event': 'on_chain_end',
+                    'parent_ids': ['graph-run'],
+                    'metadata': {'langgraph_node': 'generate_direct'},
+                    'data': {
+                        'output': {
+                            'messages': [
+                                HumanMessage(content='Повтори отправку'),
+                                AIMessage(content='Безопасный ответ из final node.'),
+                            ]
+                        }
+                    },
+                }
+            ]
+        ]
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Повтори отправку',
+    )
+
+    answer = ''.join(
+        [chunk async for chunk in consumer._stream_answer(payload, TurnPersistenceData())]
+    )
+
+    assert answer == 'Безопасный ответ из final node.'
+
+
 async def test_empty_llm_stream_is_terminal_without_replaying_graph():
     graph = _FakeGraph([[EmptyLlmStreamError()]])
     sink = _TokenSinkRecorder()

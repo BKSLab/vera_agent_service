@@ -12,12 +12,7 @@ from app.clients.mcp_client import (
 )
 from app.core.settings import GraphContextSettings
 from app.graph.context_budget import build_bounded_messages
-from app.graph.policy import (
-    CONSULTATION_EMAIL_GUARD_NOTICE,
-    consultation_email_send_is_confirmed,
-    find_last_human_message,
-    is_probably_factual_or_legal_question,
-)
+from app.graph.policy import find_last_human_message, is_probably_factual_or_legal_question
 from app.graph.prompts.system import SYSTEM_PROMPT
 from app.graph.state import AgentState
 from app.observability.request_trace import get_request_trace
@@ -44,9 +39,8 @@ def create_analyze_intent_node(
     реальный текст ответа пользователю формирует отдельный стримингованный
     вызов `generate_direct` (Этап 4.4), не этот узел.
 
-    Два решения модели дополнительно проверяются кодом (VERA-021), а не
-    принимаются как есть: мутирующая отправка консультации и отказ от
-    поиска по базе знаний на фактическом/правовом вопросе.
+    Отказ модели от поиска по базе знаний на фактическом/правовом вопросе
+    дополнительно проверяется кодом (VERA-021).
 
     Модели передаётся не вся `state['messages']`, а ограниченное по
     бюджету представление (`context_settings`, VERA-020) — полная история
@@ -68,20 +62,6 @@ def create_analyze_intent_node(
 
         if response.tool_calls:
             tool_call = response.tool_calls[0]
-            if (
-                len(response.tool_calls) == 1
-                and tool_call['name'] == SEND_CONSULTATION_EMAIL_TOOL_NAME
-                and not consultation_email_send_is_confirmed(
-                    state['messages'], tool_call['args'].get('email', '')
-                )
-            ):
-                # Мутирующая отправка не выполняется по одному лишь
-                # неподтверждённому намерению модели: граф возвращает
-                # детерминированный запрос адреса/подтверждения, а не новый
-                # LLM-вызов с инструкциями выбора tools.
-                if trace_data is not None:
-                    trace_data.route = 'direct'
-                return {'consultation_email_guard_notice': CONSULTATION_EMAIL_GUARD_NOTICE}
             if trace_data is not None:
                 if tool_call['name'] == SEND_CONSULTATION_EMAIL_TOOL_NAME:
                     trace_data.route = 'consultation_email'

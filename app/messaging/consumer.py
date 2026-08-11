@@ -28,7 +28,7 @@ from app.exceptions.chat_turn import (
 )
 from app.exceptions.llm import EmptyLlmStreamError
 from app.exceptions.messaging import InvalidAgentRequestError
-from app.graph.policy import contains_pseudo_tool_call
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE, contains_pseudo_tool_call
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -179,7 +179,6 @@ def _initial_state(payload: AgentRequestMessage) -> dict:
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
-        'consultation_email_guard_notice': None,
     }
 
 
@@ -840,29 +839,37 @@ class AgentRequestConsumer:
         config = {'configurable': {'thread_id': payload.session_id}}
         streamed_content = False
         deferred_answer: str | None = None
+        blocked_pseudo_output = False
         async for event in self._graph.astream_events(_initial_state(payload), config=config, version='v2'):
             # Node-level outputs повторяют `tool_calls`/`retrieved_chunks`.
             # Единственный authoritative snapshot — корневой graph output.
-            if event.get('event') == 'on_chain_end' and not event.get('parent_ids'):
+            event_is_chain_end = event.get('event') == 'on_chain_end'
+            event_node = event.get('metadata', {}).get('langgraph_node') or event.get('name')
+            event_is_root = event_is_chain_end and not event.get('parent_ids')
+            event_is_final_node = event_is_chain_end and event_node in FINAL_RESPONSE_NODES
+            if event_is_root or event_is_final_node:
                 output = event.get('data', {}).get('output')
                 if isinstance(output, dict):
-                    sources = output.get('retrieved_chunks')
-                    if isinstance(sources, list):
-                        persistence_data.sources = sources
-                    tool_calls = output.get('tool_calls')
-                    if isinstance(tool_calls, list):
-                        persistence_data.tool_calls = list(
-                            dict.fromkeys(
-                                tool_name
-                                for tool_name in tool_calls
-                                if isinstance(tool_name, str)
+                    if event_is_root:
+                        sources = output.get('retrieved_chunks')
+                        if isinstance(sources, list):
+                            persistence_data.sources = sources
+                        tool_calls = output.get('tool_calls')
+                        if isinstance(tool_calls, list):
+                            persistence_data.tool_calls = list(
+                                dict.fromkeys(
+                                    tool_name
+                                    for tool_name in tool_calls
+                                    if isinstance(tool_name, str)
+                                )
                             )
-                        )
-                    # Guard-ответ и детерминированный результат email-тулы
-                    # формируются AIMessage без model-stream события. Не
-                    # считать их пустым ответом: отложим безопасный текст до
-                    # завершения графа и отправим его как один SSE-token.
-                    if not streamed_content:
+                    # Детерминированный результат email-тулы формируется
+                    # AIMessage без model-stream события. Не
+                    # считать их пустым ответом: отложим текст до завершения
+                    # графа и отправим его как один SSE-token. В production
+                    # LangGraph иногда маркирует final-node event parent_ids;
+                    # поэтому учитываем и сам final node, а не только root.
+                    if not streamed_content and (event_is_root or event_is_final_node):
                         messages = output.get('messages')
                         if isinstance(messages, list):
                             for message in reversed(messages):
@@ -891,12 +898,18 @@ class AgentRequestConsumer:
             if not isinstance(content, str) or not content.strip():
                 continue
             if contains_pseudo_tool_call(content):
+                blocked_pseudo_output = True
                 logger.error('Заблокирован псевдовызов инструмента в SSE-потоке')
                 continue
             streamed_content = True
             yield content
         if not streamed_content and deferred_answer:
             yield deferred_answer
+        elif not streamed_content and blocked_pseudo_output:
+            # Даже если конкретная версия LangGraph не прислала финальный
+            # snapshot, клиент не должен получить пустую реплику после
+            # фильтрации служебного текста.
+            yield UNSAFE_TOOL_CALL_RESPONSE
 
 
 def _parse_payload(body: bytes) -> AgentRequestMessage:
