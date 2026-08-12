@@ -46,6 +46,10 @@ class TurnStartResult:
     status: str
     answer: str | None = None
     terminal_detail: str | None = None
+    used_knowledge_base: bool = False
+    """Ответ построен на данных базы знаний — повтор доставки обязан
+    воспроизвести и этот признак, иначе живой SSE-клиент и история покажут
+    для одной и той же реплики разный набор доступных действий."""
 
 
 class ChatPersistenceService:
@@ -208,6 +212,7 @@ class ChatPersistenceService:
                 status=existing_turn.status,
                 answer=existing_turn.answer,
                 terminal_detail=existing_turn.terminal_detail,
+                used_knowledge_base=bool(existing_turn.sources),
             )
 
         reclaimed = await self.chat_turn_repository.claim_expired_lease(

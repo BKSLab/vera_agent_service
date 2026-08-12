@@ -147,6 +147,7 @@ async def get_chat_history(
                         if turn.feedback is not None
                         else None
                     ),
+                    used_knowledge_base=bool(turn.sources),
                     created_at=turn.created_at,
                     completed_at=turn.completed_at,
                 )

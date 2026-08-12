@@ -149,7 +149,7 @@ async def test_successful_message_streams_tokens_and_acks():
     assert sink.calls == [
         ('r1', {'type': 'token', 'content': 'Квота'}),
         ('r1', {'type': 'token', 'content': ' 2%.'}),
-        ('r1', {'type': 'done'}),
+        ('r1', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
 
@@ -166,7 +166,7 @@ async def test_request_id_routes_delivery_without_changing_session_history_key()
     assert message.acked
     assert sink.calls == [
         ('request-1', {'type': 'token', 'content': 'Ответ'}),
-        ('request-1', {'type': 'done'}),
+        ('request-1', {'type': 'done', 'used_knowledge_base': False}),
     ]
     assert graph.states[0]['session_id'] == 'conversation-1'
     assert graph.states[0]['messages'][0].id == 'request-1'
@@ -193,7 +193,7 @@ async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():
     assert message.acked
     assert sink.calls == [
         ('r1', {'type': 'token', 'content': 'Финальный ответ.'}),
-        ('r1', {'type': 'done'}),
+        ('r1', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
 
@@ -220,7 +220,7 @@ async def test_ignores_stream_events_without_confirmed_graph_node():
     assert message.acked
     assert sink.calls == [
         ('r1', {'type': 'token', 'content': 'Финальный ответ.'}),
-        ('r1', {'type': 'done'}),
+        ('r1', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
 
@@ -256,7 +256,7 @@ async def test_streams_code_authored_final_message_when_model_was_not_called():
     assert message.acked
     assert sink.calls == [
         ('r1', {'type': 'token', 'content': 'Безопасный ответ без вызова модели.'}),
-        ('r1', {'type': 'done'}),
+        ('r1', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
 
@@ -361,7 +361,7 @@ async def test_failure_before_streaming_retries_then_succeeds():
 
     assert graph.call_count == 2
     assert message.acked
-    assert ('r1', {'type': 'done'}) in sink.calls
+    assert ('r1', {'type': 'done', 'used_knowledge_base': False}) in sink.calls
     assert not any(event.get('type') == 'error' for _, event in sink.calls)
 
 
@@ -557,3 +557,71 @@ async def test_stream_answer_uses_only_root_graph_metadata():
         'vera_rag_kb',
         'send_consultation_email',
     ]
+
+
+def _root_snapshot_event(retrieved_chunks: list, tool_calls: list[str]) -> dict:
+    """Корневой graph output — единственный authoritative snapshot, из
+    которого consumer берёт чанки и имена вызванных тулов."""
+    return {
+        'event': 'on_chain_end',
+        'parent_ids': [],
+        'data': {
+            'output': {
+                'messages': [],
+                'retrieved_chunks': retrieved_chunks,
+                'tool_calls': tool_calls,
+            }
+        },
+    }
+
+
+async def test_done_reports_knowledge_base_use_when_chunks_were_retrieved():
+    """Найденные чанки — признак, по которому сайт показывает под ответом
+    кнопку «Объяснить проще»."""
+    graph = _FakeGraph(
+        [
+            [
+                _token_event('Квота составляет 2%.', node='generate_with_context'),
+                _root_snapshot_event(
+                    [{'chunk_id': 'c1', 'text': 'Норма о квоте'}],
+                    ['vera_rag_kb'],
+                ),
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
+
+    await consumer._handle_message(message)
+
+    assert message.acked
+    assert sink.calls[-1] == ('r1', {'type': 'done', 'used_knowledge_base': True})
+
+
+async def test_done_reports_no_knowledge_base_use_when_search_found_nothing():
+    """Честный отказ «в базе знаний ничего не нашлось» не даёт кнопку:
+    упрощать нечего, хотя поиск и вызывался."""
+    graph = _FakeGraph(
+        [
+            [
+                _token_event(
+                    'Не нашёл ответа, попробуйте переформулировать.',
+                    node='generate_with_context',
+                ),
+                _root_snapshot_event([], ['vera_rag_kb']),
+            ]
+        ]
+    )
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(
+        body=b'{"session_id": "s1", "request_id": "r1", "user_id": "u1", "message": "?"}'
+    )
+
+    await consumer._handle_message(message)
+
+    assert message.acked
+    assert sink.calls[-1] == ('r1', {'type': 'done', 'used_knowledge_base': False})

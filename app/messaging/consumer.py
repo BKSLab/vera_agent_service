@@ -431,7 +431,12 @@ class AgentRequestConsumer:
                 await self._token_sink(
                     delivery.request_id, {'type': 'token', 'content': answer}
                 )
-            await delivery.send_terminal({'type': 'done'})
+            await delivery.send_terminal(
+                {
+                    'type': 'done',
+                    'used_knowledge_base': persistence_start.used_knowledge_base,
+                }
+            )
             trace_data.outcome = 'done'
             trace_data.streaming_started = bool(answer)
             trace_data.response_chunk_count = 1 if answer else 0
@@ -511,7 +516,18 @@ class AgentRequestConsumer:
                     trace_data.outcome = 'error'
                     return
 
-                await delivery.send_terminal({'type': 'done'})
+                await delivery.send_terminal(
+                    {
+                        'type': 'done',
+                        # Непустые чанки — единственный признак того, что
+                        # ответ действительно опирается на базу знаний.
+                        # Честное «не нашлось» и техническая недоступность
+                        # поиска дают пустой список и здесь неотличимы от
+                        # прямого ответа — это и требуется: предлагать
+                        # упростить нечего.
+                        'used_knowledge_base': bool(persistence_data.sources),
+                    }
+                )
                 await delivery.ack()
                 trace_data.outcome = (
                     'degraded'

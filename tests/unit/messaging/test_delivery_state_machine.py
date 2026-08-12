@@ -182,7 +182,7 @@ async def test_done_is_sent_only_after_successful_commit():
     await consumer._handle_message(message)
 
     service.complete_turn.assert_awaited_once()
-    assert sink.terminal_events == [{'type': 'done'}]
+    assert sink.terminal_events == [{'type': 'done', 'used_knowledge_base': False}]
     assert message.ack_count == 1
     assert message.settlements == 1
 
@@ -314,7 +314,7 @@ async def test_duplicate_completed_replays_saved_answer_and_done():
 
     assert sink.events == [
         {'type': 'token', 'content': 'Сохранённый ответ'},
-        {'type': 'done'},
+        {'type': 'done', 'used_knowledge_base': False},
     ]
     assert graph.call_count == 0
     assert message.ack_count == 1
@@ -336,7 +336,7 @@ async def test_duplicate_delivery_unconfirmed_replays_error_not_done():
     await consumer._handle_message(message)
 
     assert sink.terminal_events == [{'type': 'error', 'detail': COMMIT_FAILED_MESSAGE}]
-    assert {'type': 'done'} not in sink.events
+    assert not any(event.get('type') == 'done' for event in sink.events)
     assert graph.call_count == 0
     assert message.ack_count == 1
 
@@ -369,7 +369,7 @@ async def test_transient_start_persistence_error_is_retried():
     await consumer._handle_message(message)
 
     assert service.start_turn.await_count == 2
-    assert sink.terminal_events == [{'type': 'done'}]
+    assert sink.terminal_events == [{'type': 'done', 'used_knowledge_base': False}]
     assert message.ack_count == 1
 
 
@@ -419,3 +419,24 @@ async def test_shutdown_records_unconfirmed_outcome_and_propagates():
     assert sink.terminal_events == [{'type': 'error', 'detail': SHUTDOWN_MESSAGE}]
     assert service.fail_turn.await_args.kwargs['status'] == STATUS_DELIVERY_UNCONFIRMED
     assert message.settlements == 1
+
+
+async def test_duplicate_completed_replays_knowledge_base_flag():
+    """Повтор доставки обязан воспроизвести и признак использования базы
+    знаний: иначе после дубликата живой клиент потеряет кнопку «Объяснить
+    проще», которая осталась бы в истории."""
+    sink = _TokenSinkRecorder()
+    service = _persistence(
+        START_DUPLICATE_TERMINAL,
+        status=STATUS_COMPLETED,
+        answer='Сохранённый ответ',
+        used_knowledge_base=True,
+    )
+    graph = _ScriptedGraph([[]])
+    consumer = _build_consumer(graph, sink, service)
+    message = _FakeMessage(_payload())
+
+    await consumer._handle_message(message)
+
+    assert sink.terminal_events == [{'type': 'done', 'used_knowledge_base': True}]
+    assert graph.call_count == 0

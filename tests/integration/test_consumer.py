@@ -101,7 +101,7 @@ async def test_consumer_processes_published_message_end_to_end(unique_queue_name
     assert sink.calls == [
         ('integration-request', {'type': 'token', 'content': 'Квота'}),
         ('integration-request', {'type': 'token', 'content': ' составляет 2%.'}),
-        ('integration-request', {'type': 'done'}),
+        ('integration-request', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
 

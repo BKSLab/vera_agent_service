@@ -125,6 +125,7 @@ async def test_chat_history_endpoint_returns_turn_contract():
                 answer='Ответ',
                 status='completed',
                 feedback=SimpleNamespace(value='up'),
+                sources=[{'chunk_id': 'c1'}],
                 created_at=now,
                 completed_at=now,
             )
@@ -156,6 +157,7 @@ async def test_chat_history_endpoint_returns_turn_contract():
                 'answer': 'Ответ',
                 'status': 'completed',
                 'feedback_value': 'up',
+                'used_knowledge_base': True,
                 'created_at': now.isoformat().replace('+00:00', 'Z'),
                 'completed_at': now.isoformat().replace('+00:00', 'Z'),
             }
@@ -169,6 +171,47 @@ async def test_chat_history_endpoint_returns_turn_contract():
         limit=30,
         before_sequence=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_history_endpoint_reports_no_knowledge_base_use_without_sources():
+    """Пустые источники — прямой ответ либо честный отказ поиска. Кнопка
+    «Объяснить проще» после перезагрузки страницы не должна появляться там,
+    где её не было в живом диалоге."""
+    now = datetime.now(UTC)
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_history.return_value = ChatHistoryPage(
+        turns=[
+            SimpleNamespace(
+                request_id='request-1',
+                sequence_number=1,
+                question='Привет',
+                answer='Здравствуйте!',
+                status='completed',
+                feedback=None,
+                sources=[],
+                created_at=now,
+                completed_at=now,
+            )
+        ],
+        next_before_sequence=None,
+    )
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/session-1/history',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()['turns'][0]['used_knowledge_base'] is False
 
 
 @pytest.mark.asyncio

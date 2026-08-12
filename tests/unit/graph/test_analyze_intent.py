@@ -6,6 +6,10 @@ from langchain_core.tools import tool
 
 from app.core.settings import GraphContextSettings
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
+from app.graph.policy import (
+    SIMPLIFY_ANSWER_REQUEST,
+    is_probably_factual_or_legal_question,
+)
 from app.observability.request_trace import (
     AgentRequestTraceData,
     reset_request_trace,
@@ -192,6 +196,37 @@ async def test_non_factual_greeting_without_tool_call_stays_direct():
     token = set_request_trace(trace_data)
     try:
         result = await node(_state('привет'))
+    finally:
+        reset_request_trace(token)
+
+    assert result == {}
+    assert trace_data.route == 'direct'
+
+
+def test_simplify_answer_request_is_not_treated_as_legal_question():
+    """Текст кнопки «Объяснить проще» обязан оставаться чистым по ключевым
+    словам VERA-021.
+
+    Иначе нажатие кнопки под RAG-ответом код примет за новый правовой вопрос,
+    принудительно уведёт в `vera_rag_kb` и вернёт второй ответ по базе знаний
+    вместо переформулировки предыдущего.
+    """
+    assert is_probably_factual_or_legal_question(SIMPLIFY_ANSWER_REQUEST) is False
+
+
+async def test_simplify_answer_request_stays_direct():
+    """Просьба упростить ответ идёт в `generate_direct` и переформулирует
+    предыдущий ответ по истории, а не переспрашивает базу знаний."""
+    chat_model = chat_model_with_handler(
+        lambda request: _direct_response('Если коротко: работодатель обязан.'),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state(SIMPLIFY_ANSWER_REQUEST))
     finally:
         reset_request_trace(token)
 

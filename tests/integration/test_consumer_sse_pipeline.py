@@ -124,7 +124,7 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
     assert received == [
         {'type': 'token', 'content': 'Квота '},
         {'type': 'token', 'content': 'составляет 2%.'},
-        {'type': 'done'},
+        {'type': 'done', 'used_knowledge_base': False},
     ]
     assert event_ids == [1, 2, 3]
     assert sum(event['type'] in ('done', 'error') for event in received) == 1

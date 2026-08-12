@@ -25,6 +25,14 @@ class ChatHistoryTurnResponse(BaseModel):
         None,
         description='Сохранённая пользователем оценка ответа.',
     )
+    used_knowledge_base: bool = Field(
+        False,
+        description=(
+            'Ответ построен на данных базы знаний. Отдаётся вместо самих '
+            'источников: клиенту нужен только факт, а полный текст чанков '
+            'кратно утяжелил бы историю.'
+        ),
+    )
     created_at: datetime = Field(..., description='Дата создания реплики.')
     completed_at: datetime | None = Field(
         None,
@@ -47,6 +55,7 @@ class ChatHistoryResponse(BaseModel):
                         'answer': 'Размер квоты зависит от численности работников.',
                         'status': 'completed',
                         'feedback_value': 'up',
+                        'used_knowledge_base': True,
                         'created_at': '2026-07-29T12:00:00Z',
                         'completed_at': '2026-07-29T12:00:05Z',
                     }
