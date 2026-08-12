@@ -171,6 +171,8 @@ async def call_tool_with_retry(
             SpanAttributes.OPENINFERENCE_SPAN_KIND: OpenInferenceSpanKindValues.TOOL.value,
             'tool.name': tool.name,
             'tool.input.query_char_count': len(query) if isinstance(query, str) else 0,
+            SpanAttributes.INPUT_VALUE: json.dumps(arguments, ensure_ascii=False, default=str),
+            SpanAttributes.INPUT_MIME_TYPE: 'application/json',
         },
     ) as span:
         last_error: Exception | None = None
@@ -183,6 +185,13 @@ async def call_tool_with_retry(
                 span.set_attribute('tool.retry.count', retry_count)
                 span.set_attribute('tool.result.chunk_count', len(chunks))
                 span.set_attribute('tool.outcome', 'ok' if chunks else 'empty')
+                # Найденные чанки целиком: по трейсу должно быть видно, на
+                # чём именно построен ответ и почему поиск дал такой итог.
+                span.set_attribute(
+                    SpanAttributes.OUTPUT_VALUE,
+                    json.dumps(result, ensure_ascii=False, default=str),
+                )
+                span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, 'application/json')
                 trace_data = get_request_trace()
                 if trace_data is not None:
                     trace_data.mcp_retry_count += retry_count
@@ -234,8 +243,7 @@ async def call_mutating_tool_once(
     """Вызывает мутирующий MCP-инструмент ровно один раз.
 
     Повтор после timeout/сетевой ошибки запрещён: SMTP мог принять письмо до
-    разрыва соединения. Полные аргументы и ответ не записываются в span,
-    поскольку содержат консультацию и email.
+    разрыва соединения.
 
     Ответ проверяется по `result_schema` (VERA-021) — структурно некорректный
     результат (не тот тип поля, несколько content-блоков) даёт тот же
@@ -256,6 +264,8 @@ async def call_mutating_tool_once(
                 else 0
             ),
             'tool.input.email_provided': bool(arguments.get('email')),
+            SpanAttributes.INPUT_VALUE: json.dumps(arguments, ensure_ascii=False, default=str),
+            SpanAttributes.INPUT_MIME_TYPE: 'application/json',
         },
     ) as span:
         try:
@@ -286,6 +296,11 @@ async def call_mutating_tool_once(
         error_code = result.get('code')
         if isinstance(error_code, str):
             span.set_attribute('tool.error.code', error_code)
+        span.set_attribute(
+            SpanAttributes.OUTPUT_VALUE,
+            json.dumps(result, ensure_ascii=False, default=str),
+        )
+        span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, 'application/json')
         return result
 
 

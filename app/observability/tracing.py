@@ -19,9 +19,14 @@ _shutdown = False
 
 
 def _create_langchain_trace_config(
-    trace_content_enabled: bool = False,
+    trace_content_enabled: bool = True,
 ) -> TraceConfig:
-    """Скрывает содержимое LangChain/LangGraph spans без явного opt-in."""
+    """Управляет экспортом содержимого LangChain/LangGraph spans.
+
+    По умолчанию содержимое передаётся: без него в Phoenix не видно ни
+    сообщений модели, ни промптов, ни результатов узлов графа. Явное
+    отключение оставлено для окружений, где трейсы уходят наружу.
+    """
     hide_content = not trace_content_enabled
     return TraceConfig(
         hide_inputs=hide_content,

@@ -41,6 +41,14 @@ services:
       PHOENIX_WORKING_DIR: /mnt/data
     ports:
       - "6006:6006"  # UI + OTLP/HTTP (см. PHOENIX_OTLP_ENDPOINT в .env.example)
+    healthcheck:
+      # Без него агент стартует раньше Phoenix, и трейсы первых запросов
+      # не доходят: BatchSpanProcessor молча теряет их на отказе экспорта.
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:6006/', timeout=2).close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
   agent_service:
     container_name: vera_agent_service
@@ -72,4 +80,6 @@ services:
           memory: 1GB
     depends_on:
       db:
+        condition: service_healthy
+      phoenix:
         condition: service_healthy

@@ -198,9 +198,14 @@ def _build_consumer(graph, trace_content_enabled: bool = False):
     )
 
 
-async def test_tool_call_creates_logical_span_with_aggregates():
-    query = 'Секретный поисковый запрос'
-    result_text = 'Секретный результат поиска'
+async def test_tool_call_span_records_query_result_and_aggregates():
+    """По спану поиска должно быть видно, с чем звали и что вернулось.
+
+    Одних агрегатов не хватает: `chunk_count=0` не отвечает на вопрос,
+    плохой ли был запрос или в базе знаний действительно нет ответа.
+    """
+    query = 'Поисковый запрос про квоты'
+    result_text = 'Текст найденного чанка'
     await call_tool_with_retry(
         _FakeTool([{'text': result_text}]),
         {'query': query},
@@ -215,16 +220,15 @@ async def test_tool_call_creates_logical_span_with_aggregates():
     assert span.attributes['tool.result.chunk_count'] == 1
     assert span.attributes['tool.retry.count'] == 0
     assert span.attributes['tool.outcome'] == 'ok'
-    serialized_attributes = str(dict(span.attributes))
-    assert query not in serialized_attributes
-    assert result_text not in serialized_attributes
-    assert 'input.value' not in span.attributes
-    assert 'output.value' not in span.attributes
+    assert query in span.attributes['input.value']
+    assert result_text in span.attributes['output.value']
+    assert span.attributes['input.mime_type'] == 'application/json'
+    assert span.attributes['output.mime_type'] == 'application/json'
 
 
-async def test_mutating_tool_span_excludes_consultation_and_email():
-    consultation_text = 'Секретный полный текст консультации'
-    email = 'private@example.com'
+async def test_mutating_tool_span_records_arguments_and_result():
+    consultation_text = 'Полный текст консультации'
+    email = 'user@example.com'
 
     await call_mutating_tool_once(
         _FakeConsultationEmailTool(),
@@ -244,11 +248,9 @@ async def test_mutating_tool_span_excludes_consultation_and_email():
     )
     assert span.attributes['tool.input.email_provided'] is True
     assert span.attributes['tool.outcome'] == 'ok'
-    serialized_attributes = str(dict(span.attributes))
-    assert consultation_text not in serialized_attributes
-    assert email not in serialized_attributes
-    assert 'input.value' not in span.attributes
-    assert 'output.value' not in span.attributes
+    assert consultation_text in span.attributes['input.value']
+    assert email in span.attributes['input.value']
+    assert 'consultation.pdf' in span.attributes['output.value']
 
 
 async def test_publish_many_tokens_does_not_create_sse_spans():
@@ -259,7 +261,7 @@ async def test_publish_many_tokens_does_not_create_sse_spans():
     assert not [span for span in _exporter.get_finished_spans() if span.name == 'sse.deliver']
 
 
-async def test_message_creates_one_agent_root_without_full_content_by_default():
+async def test_agent_root_can_be_created_without_full_content():
     graph = _FakeGraph(
         [
             _stream_event('A'),
@@ -288,7 +290,7 @@ async def test_message_creates_one_agent_root_without_full_content_by_default():
     assert 'AБ' not in serialized_attributes
 
 
-async def test_root_full_content_requires_explicit_opt_in():
+async def test_agent_root_records_question_and_answer():
     graph = _FakeGraph([_stream_event('123456')])
     consumer = _build_consumer(graph, trace_content_enabled=True)
 
@@ -464,21 +466,10 @@ def test_exporter_uses_phoenix_project_header(monkeypatch):
     }
 
 
-def test_langchain_auto_spans_hide_conversation_content_by_default():
+def test_langchain_auto_spans_export_conversation_content_by_default():
+    """Пустые LLM-спаны бесполезны: в Phoenix не видно ни сообщений,
+    ни промптов, ни ответов модели."""
     config = _create_langchain_trace_config()
-
-    assert config.hide_inputs is True
-    assert config.hide_outputs is True
-    assert config.hide_input_messages is True
-    assert config.hide_output_messages is True
-    assert config.hide_input_text is True
-    assert config.hide_output_text is True
-    assert config.hide_prompts is True
-    assert config.hide_choices is True
-
-
-def test_langchain_auto_spans_full_content_requires_explicit_opt_in():
-    config = _create_langchain_trace_config(trace_content_enabled=True)
 
     assert config.hide_inputs is False
     assert config.hide_outputs is False
@@ -488,6 +479,20 @@ def test_langchain_auto_spans_full_content_requires_explicit_opt_in():
     assert config.hide_output_text is False
     assert config.hide_prompts is False
     assert config.hide_choices is False
+
+
+def test_langchain_auto_spans_can_be_muted_explicitly():
+    """Отключение оставлено для окружений, где трейсы уходят наружу."""
+    config = _create_langchain_trace_config(trace_content_enabled=False)
+
+    assert config.hide_inputs is True
+    assert config.hide_outputs is True
+    assert config.hide_input_messages is True
+    assert config.hide_output_messages is True
+    assert config.hide_input_text is True
+    assert config.hide_output_text is True
+    assert config.hide_prompts is True
+    assert config.hide_choices is True
 
 
 def test_disabled_phoenix_does_not_create_exporter(monkeypatch):

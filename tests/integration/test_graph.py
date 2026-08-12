@@ -442,7 +442,9 @@ async def test_consultation_email_follows_model_decision_without_confirmation_gu
         assert turn2['messages'][-1].content.startswith(f'Документ отправлен на {email}.')
 
 
-async def test_automatic_email_spans_redact_consultation_and_recipient():
+async def test_automatic_email_spans_record_consultation_and_recipient():
+    """Автоматические LangChain-спаны email-тулы больше ничего не вырезают:
+    по трейсу должно быть видно, какая консультация и на какой адрес ушла."""
     exporter = InMemorySpanExporter()
     reset_for_tests(exporter)
     requests: list[dict] = []
@@ -496,8 +498,8 @@ async def test_automatic_email_spans_redact_consultation_and_recipient():
     ]
     assert automatic_email_spans
     serialized_attributes = str([dict(span.attributes) for span in spans])
-    assert consultation_text not in serialized_attributes
-    assert recipient not in serialized_attributes
+    assert consultation_text in serialized_attributes
+    assert recipient in serialized_attributes
 
 
 async def test_consumer_collects_authoritative_metadata_from_real_graph_events():

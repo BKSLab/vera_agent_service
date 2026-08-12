@@ -201,8 +201,14 @@ class ObservabilitySettings(SettingsBase):
     phoenix_enabled: bool = True
     phoenix_otlp_endpoint: str = 'http://localhost:6006/v1/traces'
     phoenix_project_name: str = 'vera-local'
-    trace_content_enabled: bool = False
-    """Явный opt-in на экспорт полного содержимого диалогов и LLM-вызовов."""
+    trace_content_enabled: bool = True
+    """Экспорт полного содержимого диалогов, промптов и вызовов инструментов.
+
+    Включено: без содержимого Phoenix показывает только дерево спанов и
+    тайминги, а разобрать по трейсу что пришло на вход, какой инструмент
+    вызвался, с чем и что вернул — нельзя. Доступ к самому Phoenix
+    ограничивается на уровне сервиса, а не вырезанием данных из трейсов.
+    """
 
 
 class Settings(BaseSettings):
