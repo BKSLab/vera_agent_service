@@ -25,17 +25,22 @@ services:
     # vera_mcp_service, и (в перспективе) vera_rag_service экспортируют
     # трейсы сюда же через `vera_network`, чтобы получить единое дерево
     # трейса на сквозной запрос (AGENT_VERA_ARCHITECTURE.md, раздел
-    # Observability, требует именно этого). Не публичный порт в проде —
-    # см. README RAG Service, аналогичное решение по self-hosted
-    # observability-сервисам.
+    # Observability, требует именно этого).
+    #
+    # Порт опубликован: UI нужен снаружи. Тексты диалогов, промпты и
+    # сообщения в трейсы не попадают — их скрывает `trace_content_enabled`
+    # (по умолчанию False, VERA-022, `app/observability/tracing.py`). Именно
+    # это делает публикацию допустимой. Если `trace_content_enabled`
+    # когда-нибудь включат, порт нужно закрывать обратно: у Phoenix нет
+    # аутентификации.
     image: arizephoenix/phoenix:version-17.21.0
     restart: always
     volumes:
       - phoenix_data:/mnt/data
     environment:
       PHOENIX_WORKING_DIR: /mnt/data
-    expose:
-      - "6006"  # UI + OTLP/HTTP доступны только сервисам внутренней compose-сети
+    ports:
+      - "6006:6006"  # UI + OTLP/HTTP (см. PHOENIX_OTLP_ENDPOINT в .env.example)
 
   agent_service:
     container_name: vera_agent_service

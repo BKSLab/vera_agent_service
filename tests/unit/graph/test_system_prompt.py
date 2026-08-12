@@ -4,6 +4,7 @@ from app.graph.prompts.system import (
     CONSULTATION_EMAIL_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT_PARTS,
+    FINAL_WITHOUT_SEARCH_PROMPT,
     SOURCES_PROMPT,
     STYLE_PROMPT,
     SYSTEM_PROMPT,
@@ -74,6 +75,46 @@ def test_tool_usage_prompt_forbids_role_based_search_restriction():
     assert '"seeker"' not in lowered
     assert '"employer"' not in lowered
     assert '"both"' not in lowered
+
+
+def test_tool_usage_prompt_routes_follow_up_questions_into_search():
+    """Уточняющий вопрос наследует тему предыдущего ответа.
+
+    «Каким образом это сделать?» после заземлённого ответа про отпуск ушло
+    прямым ответом: в самой реплике нет ни одного предметного слова, кодовый
+    guard VERA-021 её не ловит, а промпт про такие вопросы молчал. Модель
+    изложила порядок оформления по памяти и подписала его основанием из
+    предыдущей реплики.
+    """
+    lowered = TOOL_USAGE_PROMPT.lower()
+    assert 'уточняющий вопрос' in lowered
+    assert 'наследует его тему' in lowered
+    assert 'не содержит ни одного предметного слова' in lowered
+    assert 'требуют поиска так же' in lowered
+    assert 'порядок оформления, перечень документов' in lowered
+    assert 'нельзя восстанавливать по памяти' in lowered
+    assert 'из темы предыдущего вопроса и сути уточнения' in lowered
+
+
+def test_final_prompt_forbids_new_norms_without_search_data():
+    """Вторая линия защиты: даже при ошибке маршрутизации финальный узел не
+    должен излагать нормы и порядок действий по памяти."""
+    lowered = FINAL_WITHOUT_SEARCH_PROMPT.lower()
+    assert 'опирайся только на то, что уже сказано в этом диалоге' in lowered
+    assert 'не добавляй новых норм, номеров статей, сроков' in lowered
+    assert 'перечней документов и порядка действий' in lowered
+
+    # Упрощение обязано сохранять «Основание:» предыдущего ответа, поэтому
+    # запрет точечный: нельзя составлять новое основание, а не выводить его.
+    assert 'переформулировать, сократить, упростить или пояснить' in lowered
+    assert 'дословно повторяет основание из предыдущего ответа' in lowered
+    assert 'не составляй новое основание' in lowered
+
+    assert FINAL_WITHOUT_SEARCH_PROMPT in FINAL_RESPONSE_SYSTEM_PROMPT
+    # Правило нужно обоим финальным узлам, но имён MCP-тулов в нём быть не
+    # должно — иначе модель воспроизведёт их текстовым псевдовызовом.
+    assert 'vera_rag_kb' not in lowered
+    assert 'send_consultation_email' not in lowered
 
 
 def test_consultation_email_prompt_requires_explicit_safe_request():
