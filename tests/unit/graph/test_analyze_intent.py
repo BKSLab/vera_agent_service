@@ -11,6 +11,7 @@ from app.graph.policy import (
     SIMPLIFY_ANSWER_REQUEST,
     contains_legal_reference,
     is_probably_factual_or_legal_question,
+    is_reference_only,
 )
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -167,6 +168,34 @@ async def test_consultation_email_tool_call_is_allowed_for_explicit_request_with
     assert trace_data.route_reason == 'model_tool_call'
 
 
+async def test_reference_inside_email_command_does_not_bypass_llm_tool_choice():
+    query = 'Отправь консультацию по статье 81 ТК РФ на user@example.com'
+    arguments = {
+        'consultation_text': 'Консультация по статье 81 ТК РФ.',
+        'email': 'user@example.com',
+    }
+    calls = {'count': 0}
+
+    def handler(request):
+        calls['count'] += 1
+        return _tool_call_response('send_consultation_email', arguments)
+
+    chat_model = chat_model_with_handler(handler, streaming=False)
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+
+    result = await node(_state(query))
+
+    tool_call = result['messages'][0].tool_calls[0]
+    assert calls['count'] == 1
+    assert tool_call['name'] == 'send_consultation_email'
+    assert tool_call['args'] == arguments
+
+
 async def test_factual_question_without_tool_call_is_forced_into_kb_search():
     """Модель ошибочно решила ответить напрямую на вопрос из предметной
     области базы знаний — код принудительно направляет его в поиск
@@ -229,19 +258,44 @@ def test_contains_legal_reference_rejects_ambiguous_everyday_phrases():
     'query',
     (
         'п. 2 ч. 1 ст. 81 ТК РФ',
+        'п. 1 ч. 1 ст. 999 ТК РФ',
         'статья 81 ТК РФ',
-        'статьи 81 ТК РФ',
-        'статье 81 ТК РФ',
-        'статью 128 ТК РФ',
-        'ст 128 ТК РФ',
-        'Можно ли уволить по п. 2 ч. 1 ст. 81 ТК РФ?',
+        'ТК РФ, статья 21',
+        'ФЗ-181',
+        'Статья 21 Федерального закона от 24.11.1995 № 181-ФЗ',
     ),
 )
-async def test_legal_reference_without_tool_call_is_forced_verbatim_into_kb_search(query):
-    chat_model = chat_model_with_handler(
-        lambda request: _direct_response('Отвечу без поиска.'),
-        streaming=False,
-    )
+def test_reference_only_accepts_replica_made_entirely_of_legal_requisites(query):
+    assert is_reference_only(query) is True
+
+
+@pytest.mark.parametrize(
+    'query',
+    (
+        'Можно ли уволить по п. 2 ч. 1 ст. 81 ТК РФ?',
+        'Правда ли, что положено 90 дней отпуска по статье 128 ТК РФ?',
+        'Отправь консультацию по статье 81 ТК РФ на user@example.com',
+        'Статья 21',
+        '',
+    ),
+)
+def test_reference_only_rejects_questions_commands_and_incomplete_requisites(query):
+    assert is_reference_only(query) is False
+
+
+@pytest.mark.parametrize(
+    'query',
+    (
+        'п. 2 ч. 1 ст. 81 ТК РФ',
+        'п. 1 ч. 1 ст. 999 ТК РФ',
+        'Статья 21 Федерального закона от 24.11.1995 № 181-ФЗ',
+    ),
+)
+async def test_reference_only_bypasses_llm_and_goes_verbatim_into_kb_search(query):
+    def fail_if_called(request):
+        pytest.fail('reference_only не должен вызывать intent-LLM')
+
+    chat_model = chat_model_with_handler(fail_if_called, streaming=False)
     node = create_analyze_intent_node(
         chat_model,
         vera_rag_kb,
@@ -260,8 +314,45 @@ async def test_legal_reference_without_tool_call_is_forced_verbatim_into_kb_sear
     assert tool_call['name'] == 'vera_rag_kb'
     assert tool_call['args'] == {'query': query}
     assert trace_data.route == 'knowledge_base'
-    assert trace_data.route_reason == 'legal_reference'
+    assert trace_data.route_reason == 'reference_only'
     assert trace_data.search_required is True
+
+
+@pytest.mark.parametrize(
+    'query',
+    (
+        'Можно ли уволить по п. 2 ч. 1 ст. 81 ТК РФ?',
+        'Правда ли, что работающему инвалиду положено 90 дней отпуска по статье 128 ТК РФ?',
+    ),
+)
+async def test_question_with_legal_reference_still_calls_llm_before_guard(query):
+    calls = {'count': 0}
+
+    def handler(request):
+        calls['count'] += 1
+        return _direct_response('Отвечу без поиска.')
+
+    chat_model = chat_model_with_handler(handler, streaming=False)
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state(query))
+    finally:
+        reset_request_trace(token)
+
+    tool_call = result['messages'][0].tool_calls[0]
+    assert calls['count'] == 1
+    assert tool_call['name'] == 'vera_rag_kb'
+    assert tool_call['args'] == {'query': query}
+    assert trace_data.route == 'knowledge_base'
+    assert trace_data.route_reason == 'legal_reference'
 
 
 async def test_article_term_without_strong_reference_uses_bounded_keyword_guard():
@@ -293,6 +384,38 @@ async def test_article_term_without_strong_reference_uses_bounded_keyword_guard(
 
 def test_article_word_guard_does_not_match_verb_stat():
     assert is_probably_factual_or_legal_question('Как стать увереннее?') is False
+
+
+def test_keyword_guard_matches_stems_only_at_word_start():
+    assert is_probably_factual_or_legal_question('Каким способом поменять пароль?') is False
+    assert is_probably_factual_or_legal_question(
+        'Каким способом работодатель должен выполнить квоту?'
+    ) is True
+    assert is_probably_factual_or_legal_question('Как оформить пособие?') is True
+
+
+async def test_password_question_without_tool_call_is_not_forced_into_kb_search():
+    chat_model = chat_model_with_handler(
+        lambda request: _direct_response('Уточните, о каком сервисе идёт речь.'),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state('Каким способом поменять пароль?'))
+    finally:
+        reset_request_trace(token)
+
+    assert result == {}
+    assert trace_data.route == 'direct'
+    assert trace_data.route_reason == 'model_direct'
 
 
 async def test_non_factual_greeting_without_tool_call_stays_direct():

@@ -109,3 +109,4 @@ def test_llm_temperature_defaults_to_0_3() -> None:
     )
 
     assert settings.llm_temperature == 0.3
+    assert settings.llm_reasoning_effort is None

@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 from app.clients.llm import ainvoke_with_retry, astream_tokens, get_chat_model
@@ -90,6 +91,7 @@ async def test_get_chat_model_omits_temperature_from_payload():
         await model.ainvoke([HumanMessage(content='Привет')])
 
     assert 'temperature' not in captured_payload
+    assert 'reasoning' not in captured_payload
 
 
 async def test_get_chat_model_includes_configured_temperature_in_payload():
@@ -111,6 +113,37 @@ async def test_get_chat_model_includes_configured_temperature_in_payload():
         await model.ainvoke([HumanMessage(content='Привет')])
 
     assert captured_payload['temperature'] == 0.3
+
+
+async def test_get_chat_model_passes_reasoning_low_through_bound_tools():
+    captured_payload: dict = {}
+    captured_path = ''
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal captured_path
+        captured_path = request.url.path
+        captured_payload.update(json.loads(request.content))
+        return _completion_response('Привет')
+
+    @tool
+    def vera_rag_kb(query: str) -> dict:
+        """Поиск по базе знаний."""
+        return {'query': query}
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as async_client:
+        settings = LlmSettings(
+            llm_api_key='test-key',
+            llm_api_url='http://mock/v1',
+            llm_reasoning_effort='low',
+            _env_file=None,
+        )
+        model = get_chat_model(async_client, settings).bind_tools([vera_rag_kb])
+        await model.ainvoke([HumanMessage(content='Статья 81 ТК РФ')])
+
+    assert captured_payload['reasoning'] == {'effort': 'low'}
+    assert captured_payload['tools'][0]['function']['name'] == 'vera_rag_kb'
+    assert captured_path.endswith('/chat/completions')
 
 
 async def test_ainvoke_with_retry_accepts_tool_calls_without_content():

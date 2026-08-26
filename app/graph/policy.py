@@ -48,6 +48,36 @@ _ARTICLE_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_REFERENCE_NUMBER_PATTERN = r'\d{1,4}(?:\.\d+)*'
+_LEGAL_CODE_PATTERN = r'(?:тк|гк|гпк|апк|коап|ук|упк|нк|ск|жк|зк|бк|кас)\s*рф'
+_ARTICLE_LABEL_PATTERN = r'(?:ст\.?|стать(?:я|и|е|ю|ей|ёй))'
+_SUBDIVISION_PATTERN = (
+    rf'(?:п\.?|пункт(?:а|е|у|ом)?|ч\.?|част(?:ь|и|ью))\s*{_REFERENCE_NUMBER_PATTERN}'
+)
+_CODE_REFERENCE_ONLY_RE = re.compile(
+    rf'(?:{_SUBDIVISION_PATTERN}[\s,;]*)*'
+    rf'(?:'
+    rf'{_ARTICLE_LABEL_PATTERN}\s*{_REFERENCE_NUMBER_PATTERN}'
+    rf'[\s,;:()/\-]{{0,32}}{_LEGAL_CODE_PATTERN}'
+    rf'|'
+    rf'{_LEGAL_CODE_PATTERN}[\s,;:()/\-]{{0,32}}'
+    rf'{_ARTICLE_LABEL_PATTERN}\s*{_REFERENCE_NUMBER_PATTERN}'
+    rf')'
+    rf'[\s.!?]*',
+    re.IGNORECASE,
+)
+_FEDERAL_LAW_NUMBER_PATTERN = (
+    r'(?:(?:№\s*)?\d{1,4}\s*[-‐‑–—]\s*фз|фз\s*(?:№\s*|[-‐‑–—]\s*)\d{1,4})'
+)
+_FEDERAL_LAW_LABEL_PATTERN = r'федеральн(?:ый|ого|ому|ым|ом)\s+закон(?:а|е|у|ом)?'
+_LEGAL_DATE_PATTERN = r'\d{1,2}[./-]\d{1,2}[./-]\d{2,4}'
+_FEDERAL_LAW_REFERENCE_ONLY_RE = re.compile(
+    rf'(?:{_ARTICLE_LABEL_PATTERN}\s*{_REFERENCE_NUMBER_PATTERN}[\s,]*)?'
+    rf'(?:{_FEDERAL_LAW_LABEL_PATTERN}(?:\s+от\s+{_LEGAL_DATE_PATTERN})?[\s,]*)?'
+    rf'{_FEDERAL_LAW_NUMBER_PATTERN}[\s.!?]*',
+    re.IGNORECASE,
+)
+
 
 def contains_legal_reference(text: str) -> bool:
     """Есть ли в тексте сильные реквизиты правовой нормы.
@@ -62,11 +92,27 @@ def contains_legal_reference(text: str) -> bool:
     )
 
 
+def is_reference_only(text: str) -> bool:
+    """Состоит ли вся реплика только из реквизитов правовой нормы.
+
+    Предикат намеренно консервативен: ложный отрицательный результат лишь
+    оставит обычный LLM-маршрут, а ложный положительный мог бы пропустить
+    выбор инструмента и декомпозицию содержательного вопроса. Исходный текст
+    не нормализуется для tool query; `strip()` применяется только к проверке.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return bool(
+        _CODE_REFERENCE_ONLY_RE.fullmatch(stripped)
+        or _FEDERAL_LAW_REFERENCE_ONLY_RE.fullmatch(stripped)
+    )
+
+
 _FACTUAL_LEGAL_KEYWORDS = (
     'закон',
     'кодекс',
-    'квота',
-    'квоты',
+    'квот',
     'право',
     'права',
     'льгот',
@@ -97,13 +143,17 @@ _FACTUAL_LEGAL_KEYWORDS = (
 отдельным regex с границами слова; «часть» и «пункт» самостоятельно не
 считаются достаточным признаком."""
 
+_FACTUAL_LEGAL_KEYWORD_PATTERNS = tuple(
+    re.compile(rf'(?<!\w){re.escape(keyword)}', re.IGNORECASE)
+    for keyword in _FACTUAL_LEGAL_KEYWORDS
+)
+
 
 def is_probably_factual_or_legal_question(text: str) -> bool:
     """Похож ли вопрос пользователя на фактический/правовой запрос,
     прямой ответ на который мимо базы знаний недопустим (VERA-021)."""
-    lowered = text.lower()
     return bool(
-        any(keyword in lowered for keyword in _FACTUAL_LEGAL_KEYWORDS)
+        any(pattern.search(text) for pattern in _FACTUAL_LEGAL_KEYWORD_PATTERNS)
         or _ARTICLE_WORD_RE.search(text)
     )
 
