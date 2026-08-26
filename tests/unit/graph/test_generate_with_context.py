@@ -5,6 +5,11 @@ from langchain_core.messages import HumanMessage
 
 from app.core.settings import GraphContextSettings
 from app.graph.nodes.generate_with_context import create_generate_with_context_node
+from app.graph.prompts.context import (
+    NO_ANSWER_INSTRUCTION,
+    NO_SEARCH_PERFORMED_INSTRUCTION,
+    SEARCH_UNAVAILABLE_INSTRUCTION,
+)
 from tests.unit.graph._mock_llm import chat_model_with_handler, stream_response
 
 _CONTEXT_SETTINGS = GraphContextSettings()
@@ -21,10 +26,13 @@ def _state(retrieved_chunks, search_unavailable):
     }
 
 
-def _last_system_message_content(request: httpx.Request) -> str:
+def _system_message_contents(request: httpx.Request) -> list[str]:
     payload = json.loads(request.content)
-    system_messages = [message for message in payload['messages'] if message['role'] == 'system']
-    return system_messages[-1]['content']
+    return [message['content'] for message in payload['messages'] if message['role'] == 'system']
+
+
+def _last_system_message_content(request: httpx.Request) -> str:
+    return _system_message_contents(request)[-1]
 
 
 async def test_branch_with_chunks_includes_chunk_text_in_instruction():
@@ -87,7 +95,7 @@ async def test_branch_no_answer_when_chunks_empty_and_search_available():
     captured = {}
 
     def handler(request):
-        captured['instruction'] = _last_system_message_content(request)
+        captured['system_messages'] = _system_message_contents(request)
         return stream_response(['В базе знаний нет ответа на этот вопрос.'])
 
     chat_model = chat_model_with_handler(handler)
@@ -95,8 +103,10 @@ async def test_branch_no_answer_when_chunks_empty_and_search_available():
 
     result = await node(_state([], search_unavailable=False))
 
-    assert 'не нашёл информации' in captured['instruction']
-    assert 'выдумывай' in captured['instruction']
+    assert captured['system_messages'][-1] == NO_ANSWER_INSTRUCTION
+    assert NO_SEARCH_PERFORMED_INSTRUCTION not in captured['system_messages']
+    assert 'не нашёл информации' in captured['system_messages'][-1]
+    assert 'выдумывай' in captured['system_messages'][-1]
     assert result['messages'][0].content == 'В базе знаний нет ответа на этот вопрос.'
 
 
@@ -104,7 +114,7 @@ async def test_branch_search_unavailable_differs_from_no_answer_branch():
     captured = {}
 
     def handler(request):
-        captured['instruction'] = _last_system_message_content(request)
+        captured['system_messages'] = _system_message_contents(request)
         return stream_response(['Поиск сейчас недоступен, попробуйте позже.'])
 
     chat_model = chat_model_with_handler(handler)
@@ -112,6 +122,8 @@ async def test_branch_search_unavailable_differs_from_no_answer_branch():
 
     result = await node(_state([], search_unavailable=True))
 
-    assert 'технически недоступен' in captured['instruction']
-    assert 'не нашёл информации' not in captured['instruction']
+    assert captured['system_messages'][-1] == SEARCH_UNAVAILABLE_INSTRUCTION
+    assert NO_SEARCH_PERFORMED_INSTRUCTION not in captured['system_messages']
+    assert 'технически недоступен' in captured['system_messages'][-1]
+    assert 'не нашёл информации' not in captured['system_messages'][-1]
     assert result['messages'][0].content == 'Поиск сейчас недоступен, попробуйте позже.'

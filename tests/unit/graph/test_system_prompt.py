@@ -1,10 +1,14 @@
+from app.graph.prompts.context import (
+    NO_ANSWER_INSTRUCTION,
+    NO_SEARCH_PERFORMED_INSTRUCTION,
+    SEARCH_UNAVAILABLE_INSTRUCTION,
+)
 from app.graph.prompts.description import VERA_DESCRIPTION_PROMPT
 from app.graph.prompts.role import VERA_ROLE_PROMPT
 from app.graph.prompts.system import (
     CONSULTATION_EMAIL_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT_PARTS,
-    FINAL_WITHOUT_SEARCH_PROMPT,
     SOURCES_PROMPT,
     STYLE_PROMPT,
     SYSTEM_PROMPT,
@@ -32,6 +36,14 @@ def test_prompt_covers_two_audiences_including_workers_with_disabilities():
     assert 'работодател' in lowered
 
 
+def test_role_prompt_does_not_turn_specialization_into_user_facts():
+    lowered = VERA_ROLE_PROMPT.lower()
+
+    assert 'не являются сведениями о конкретном пользователе' in lowered
+    assert 'не считай его инвалидом, соискателем, работником или работодателем' in lowered
+    assert 'не разрешает угадывать отсутствующий предмет' in lowered
+
+
 def test_prompt_forbids_inventing_facts():
     assert 'не выдумывай' in SYSTEM_PROMPT.lower()
 
@@ -55,10 +67,20 @@ def test_sources_prompt_requires_rag_grounded_legal_basis_in_every_answer():
     assert 'простыми словами не отменяет обязательное указание основания' in lowered
 
 
-def test_prompt_requires_honest_refusal_when_no_data():
-    lowered = SYSTEM_PROMPT.lower()
-    assert 'честно сообщи' in lowered
-    assert 'недоступен' in lowered
+def test_search_outcome_instructions_require_honest_refusal():
+    assert 'честно сообщи' in NO_ANSWER_INSTRUCTION.lower()
+    assert 'технически недоступен' in SEARCH_UNAVAILABLE_INSTRUCTION.lower()
+
+
+def test_shared_final_prompt_has_no_branch_specific_search_outcomes():
+    lowered = FINAL_RESPONSE_SYSTEM_PROMPT.lower()
+
+    assert NO_SEARCH_PERFORMED_INSTRUCTION not in FINAL_RESPONSE_SYSTEM_PROMPT
+    assert NO_ANSWER_INSTRUCTION not in FINAL_RESPONSE_SYSTEM_PROMPT
+    assert SEARCH_UNAVAILABLE_INSTRUCTION not in FINAL_RESPONSE_SYSTEM_PROMPT
+    assert 'поиск по базе знаний в текущем запросе не вызывался' not in lowered
+    assert 'поиск по базе знаний не нашёл информации' not in lowered
+    assert 'поиск по базе знаний сейчас технически недоступен' not in lowered
 
 
 def test_tool_usage_prompt_requires_a_self_contained_query():
@@ -66,6 +88,42 @@ def test_tool_usage_prompt_requires_a_self_contained_query():
     assert 'vera_rag_kb' in lowered
     assert 'самодостаточный поисковый запрос' in lowered
     assert 'контекст из истории диалога' in lowered
+
+
+def test_tool_usage_prompt_requires_search_for_verifiable_legal_facts():
+    lowered = TOOL_USAGE_PROMPT.lower()
+
+    assert 'обязательно вызывай его для любого вопроса' in lowered
+    assert 'правового или иного проверяемого факта' in lowered
+    assert 'права, обязанности, запрета, гарантии' in lowered
+    assert 'срока, суммы, процедуры, документов, последствий или органа защиты' in lowered
+
+
+def test_tool_usage_prompt_preserves_exact_reference_and_self_contained_query():
+    lowered = TOOL_USAGE_PROMPT.lower()
+
+    assert 'передай в query его текст дословно' in lowered
+    assert 'query должен символ в символ совпадать с сообщением' in lowered
+    assert 'п. 2 ч. 1 ст. 81 тк рф' in lowered
+    assert 'не объясняй содержание нормы до получения результатов поиска' in lowered
+
+
+def test_tool_usage_prompt_forbids_invented_context_and_user_facts():
+    lowered = TOOL_USAGE_PROMPT.lower()
+
+    assert 'не добавляй в query инвалидность, роль, предмет отказа' in lowered
+    assert 'первое сообщение не имеет предыдущего контекста' in lowered
+    assert 'не ссылайся на якобы предыдущий диалог' in lowered
+    assert 'задай короткий уточняющий вопрос' in lowered
+
+
+def test_tool_usage_prompt_gives_clarification_priority_for_incomplete_query():
+    lowered = TOOL_USAGE_PROMPT.lower()
+
+    assert 'правило уточнения имеет приоритет' in lowered
+    assert 'не вызывай инструмент с неполным или дополненным догадкой query' in lowered
+    assert 'отдельного тематического слова' in lowered
+    assert 'не делает реплику самодостаточной' in lowered
 
 
 def test_tool_usage_prompt_forbids_role_based_search_restriction():
@@ -96,10 +154,10 @@ def test_tool_usage_prompt_routes_follow_up_questions_into_search():
     assert 'из темы предыдущего вопроса и сути уточнения' in lowered
 
 
-def test_final_prompt_forbids_new_norms_without_search_data():
+def test_no_search_instruction_forbids_new_norms_and_false_search_status():
     """Вторая линия защиты: даже при ошибке маршрутизации финальный узел не
     должен излагать нормы и порядок действий по памяти."""
-    lowered = FINAL_WITHOUT_SEARCH_PROMPT.lower()
+    lowered = NO_SEARCH_PERFORMED_INSTRUCTION.lower()
     assert 'опирайся только на то, что уже сказано в этом диалоге' in lowered
     assert 'не добавляй новых норм, номеров статей, сроков' in lowered
     assert 'перечней документов и порядка действий' in lowered
@@ -109,10 +167,14 @@ def test_final_prompt_forbids_new_norms_without_search_data():
     assert 'переформулировать, сократить, упростить или пояснить' in lowered
     assert 'дословно повторяет основание из предыдущего ответа' in lowered
     assert 'не составляй новое основание' in lowered
+    assert 'не придумывай предыдущие реплики' in lowered
+    assert 'неполная первая реплика не может наследовать тему' in lowered
+    assert 'поиск по базе знаний в текущем запросе не вызывался' in lowered
+    assert 'не сообщай о недоступности поиска, ограничении доступа' in lowered
+    assert 'или отсутствии информации в базе знаний: это не проверялось' in lowered
 
-    assert FINAL_WITHOUT_SEARCH_PROMPT in FINAL_RESPONSE_SYSTEM_PROMPT
-    # Правило нужно обоим финальным узлам, но имён MCP-тулов в нём быть не
-    # должно — иначе модель воспроизведёт их текстовым псевдовызовом.
+    assert NO_SEARCH_PERFORMED_INSTRUCTION not in FINAL_RESPONSE_SYSTEM_PROMPT
+    # Имена MCP-тулов повышают риск текстового псевдовызова в финальном узле.
     assert 'vera_rag_kb' not in lowered
     assert 'send_consultation_email' not in lowered
 

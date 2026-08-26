@@ -114,8 +114,15 @@ async def test_kb_search_proxy_uses_vera_rag_kb_public_name_and_resolves_remote_
     remote_tool = _FakeTool(results=[{'chunks': []}, {'chunks': []}])
     client = _FakeClient(tools=[remote_tool])
     proxy = build_kb_search_tool_proxy(client)
+    normalized_description = ' '.join(proxy.description.split())
 
     assert proxy.name == 'vera_rag_kb'
+    assert 'дословно' in proxy.description
+    assert 'не добавляй инвалидность, роль или аудиторию' in proxy.description.lower()
+    assert 'символ в символ' in proxy.description
+    assert 'Уточнение приоритетнее вызова' in normalized_description
+    assert 'отдельного тематического слова недостаточно' in normalized_description
+    assert 'Пустой chunks' in normalized_description
 
     await proxy.ainvoke({'query': 'квота'})
     await proxy.ainvoke({'query': 'льготы'})
