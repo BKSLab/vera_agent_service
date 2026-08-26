@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from app.core.settings import (
     DBSettings,
+    LlmSettings,
     McpSettings,
     RabbitMQSettings,
     RedisSettings,
@@ -94,3 +95,17 @@ def test_streaming_deadline_uses_configured_email_tool_timeout() -> None:
 
     with pytest.raises(ValueError, match='consultation email'):
         settings.validate_stream_deadline_covers_longest_tool()
+
+
+def test_llm_defaults_to_gemini_3_7_flash() -> None:
+    assert LlmSettings.model_fields['llm_model'].default == 'google/gemini-3.7-flash'
+
+
+def test_llm_temperature_defaults_to_0_3() -> None:
+    settings = LlmSettings(
+        llm_api_key='test-key',
+        llm_api_url='http://mock/v1',
+        _env_file=None,
+    )
+
+    assert settings.llm_temperature == 0.3

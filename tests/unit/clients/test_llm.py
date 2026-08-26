@@ -6,7 +6,8 @@ import pytest
 from langchain_core.messages import AIMessageChunk, HumanMessage
 from langchain_openai import ChatOpenAI
 
-from app.clients.llm import ainvoke_with_retry, astream_tokens
+from app.clients.llm import ainvoke_with_retry, astream_tokens, get_chat_model
+from app.core.settings import LlmSettings
 from app.exceptions.llm import EmptyLlmStreamError, LlmApiRequestError
 
 
@@ -68,6 +69,48 @@ async def test_ainvoke_with_retry_returns_content_on_success():
     model = _chat_model(lambda request: _completion_response('Привет'))
     result = await ainvoke_with_retry(model, [HumanMessage(content='Привет')])
     assert result.content == 'Привет'
+
+
+async def test_get_chat_model_omits_temperature_from_payload():
+    captured_payload: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_payload.update(json.loads(request.content))
+        return _completion_response('Привет')
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as async_client:
+        settings = LlmSettings(
+            llm_api_key='test-key',
+            llm_api_url='http://mock/v1',
+            llm_temperature=None,
+            _env_file=None,
+        )
+        model = get_chat_model(async_client, settings)
+        await model.ainvoke([HumanMessage(content='Привет')])
+
+    assert 'temperature' not in captured_payload
+
+
+async def test_get_chat_model_includes_configured_temperature_in_payload():
+    captured_payload: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_payload.update(json.loads(request.content))
+        return _completion_response('Привет')
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as async_client:
+        settings = LlmSettings(
+            llm_api_key='test-key',
+            llm_api_url='http://mock/v1',
+            llm_temperature=0.3,
+            _env_file=None,
+        )
+        model = get_chat_model(async_client, settings)
+        await model.ainvoke([HumanMessage(content='Привет')])
+
+    assert captured_payload['temperature'] == 0.3
 
 
 async def test_ainvoke_with_retry_accepts_tool_calls_without_content():
