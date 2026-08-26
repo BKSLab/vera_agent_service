@@ -14,6 +14,7 @@ class AgentRequestTraceData:
     консультацию второй раз (VERA-014)."""
 
     route: str = 'unknown'
+    route_reason: str | None = None
     search_required: bool = False
     search_unavailable: bool = False
     search_chunk_count: int = 0

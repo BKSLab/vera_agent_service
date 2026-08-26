@@ -12,7 +12,11 @@ from app.clients.mcp_client import (
 )
 from app.core.settings import GraphContextSettings
 from app.graph.context_budget import build_bounded_messages
-from app.graph.policy import find_last_human_message, is_probably_factual_or_legal_question
+from app.graph.policy import (
+    contains_legal_reference,
+    find_last_human_message,
+    is_probably_factual_or_legal_question,
+)
 from app.graph.prompts.system import SYSTEM_PROMPT
 from app.graph.state import AgentState
 from app.observability.request_trace import get_request_trace
@@ -63,6 +67,7 @@ def create_analyze_intent_node(
         if response.tool_calls:
             tool_call = response.tool_calls[0]
             if trace_data is not None:
+                trace_data.route_reason = 'model_tool_call'
                 if tool_call['name'] == SEND_CONSULTATION_EMAIL_TOOL_NAME:
                     trace_data.route = 'consultation_email'
                 else:
@@ -72,12 +77,21 @@ def create_analyze_intent_node(
 
         if trace_data is not None:
             trace_data.route = 'direct'
+            trace_data.route_reason = 'model_direct'
 
         last_human = find_last_human_message(state['messages'])
+        has_legal_reference = (
+            last_human is not None
+            and isinstance(last_human.content, str)
+            and contains_legal_reference(last_human.content)
+        )
         if (
             last_human is not None
             and isinstance(last_human.content, str)
-            and is_probably_factual_or_legal_question(last_human.content)
+            and (
+                has_legal_reference
+                or is_probably_factual_or_legal_question(last_human.content)
+            )
         ):
             # Модель решила ответить напрямую на вопрос, похожий на
             # фактический/правовой — код запрещает прямой ответ мимо базы
@@ -86,6 +100,11 @@ def create_analyze_intent_node(
             # по-прежнему формирует generate_with_context.
             if trace_data is not None:
                 trace_data.route = 'knowledge_base'
+                trace_data.route_reason = (
+                    'legal_reference'
+                    if has_legal_reference
+                    else 'factual_or_legal_keyword'
+                )
                 trace_data.search_required = True
             forced_message = AIMessage(
                 content='',

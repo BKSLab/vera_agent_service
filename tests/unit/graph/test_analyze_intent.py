@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 
@@ -8,6 +9,7 @@ from app.core.settings import GraphContextSettings
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
 from app.graph.policy import (
     SIMPLIFY_ANSWER_REQUEST,
+    contains_legal_reference,
     is_probably_factual_or_legal_question,
 )
 from app.observability.request_trace import (
@@ -110,6 +112,7 @@ async def test_returns_tool_call_message_when_tool_needed():
     assert ai_message.tool_calls[0]['name'] == 'vera_rag_kb'
     assert ai_message.tool_calls[0]['args'] == {'query': 'квота'}
     assert trace_data.route == 'knowledge_base'
+    assert trace_data.route_reason == 'model_tool_call'
     assert trace_data.search_required is True
 
 
@@ -134,6 +137,7 @@ async def test_returns_empty_update_when_tool_not_needed():
 
     assert result == {}
     assert trace_data.route == 'direct'
+    assert trace_data.route_reason == 'model_direct'
     assert trace_data.search_required is False
 
 
@@ -160,6 +164,7 @@ async def test_consultation_email_tool_call_is_allowed_for_explicit_request_with
     assert ai_message.tool_calls[0]['name'] == 'send_consultation_email'
     assert ai_message.tool_calls[0]['args'] == arguments
     assert trace_data.route == 'consultation_email'
+    assert trace_data.route_reason == 'model_tool_call'
 
 
 async def test_factual_question_without_tool_call_is_forced_into_kb_search():
@@ -185,7 +190,109 @@ async def test_factual_question_without_tool_call_is_forced_into_kb_search():
         'query': 'Какая квота на трудоустройство инвалидов?'
     }
     assert trace_data.route == 'knowledge_base'
+    assert trace_data.route_reason == 'factual_or_legal_keyword'
     assert trace_data.search_required is True
+
+
+def test_contains_legal_reference_accepts_only_strong_legal_requisites():
+    references = (
+        'п. 2 ч. 1 ст. 81 ТК РФ',
+        'статья 81 ТК РФ',
+        'статьи 81 ТК РФ',
+        'статье 81 ТК РФ',
+        'статью 128 ТК РФ',
+        'ст. 128 ТК РФ',
+        'ст 128 ТК РФ',
+        'статьёй 128 ТК РФ',
+        'ТК РФ, статья 21',
+        'статья 21 № 181-ФЗ',
+        'ФЗ-181',
+        'Можно ли уволить по п. 2 ч. 1 ст. 81 ТК РФ?',
+    )
+
+    assert all(contains_legal_reference(text) for text in references)
+
+
+def test_contains_legal_reference_rejects_ambiguous_everyday_phrases():
+    phrases = (
+        'Статья 21',
+        'Статья 21 в журнале посвящена найму персонала',
+        'Пункт 2 плана и часть 1 отчёта',
+        'Мне 81 год',
+        'Объясни предыдущий ответ проще',
+    )
+
+    assert not any(contains_legal_reference(text) for text in phrases)
+
+
+@pytest.mark.parametrize(
+    'query',
+    (
+        'п. 2 ч. 1 ст. 81 ТК РФ',
+        'статья 81 ТК РФ',
+        'статьи 81 ТК РФ',
+        'статье 81 ТК РФ',
+        'статью 128 ТК РФ',
+        'ст 128 ТК РФ',
+        'Можно ли уволить по п. 2 ч. 1 ст. 81 ТК РФ?',
+    ),
+)
+async def test_legal_reference_without_tool_call_is_forced_verbatim_into_kb_search(query):
+    chat_model = chat_model_with_handler(
+        lambda request: _direct_response('Отвечу без поиска.'),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state(query))
+    finally:
+        reset_request_trace(token)
+
+    tool_call = result['messages'][0].tool_calls[0]
+    assert tool_call['name'] == 'vera_rag_kb'
+    assert tool_call['args'] == {'query': query}
+    assert trace_data.route == 'knowledge_base'
+    assert trace_data.route_reason == 'legal_reference'
+    assert trace_data.search_required is True
+
+
+async def test_article_term_without_strong_reference_uses_bounded_keyword_guard():
+    query = 'Какая статья защищает беременных?'
+    chat_model = chat_model_with_handler(
+        lambda request: _direct_response('Отвечу без поиска.'),
+        streaming=False,
+    )
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(_state(query))
+    finally:
+        reset_request_trace(token)
+
+    tool_call = result['messages'][0].tool_calls[0]
+    assert tool_call['name'] == 'vera_rag_kb'
+    assert tool_call['args'] == {'query': query}
+    assert trace_data.route == 'knowledge_base'
+    assert trace_data.route_reason == 'factual_or_legal_keyword'
+
+
+def test_article_word_guard_does_not_match_verb_stat():
+    assert is_probably_factual_or_legal_question('Как стать увереннее?') is False
 
 
 async def test_non_factual_greeting_without_tool_call_stays_direct():
@@ -201,6 +308,7 @@ async def test_non_factual_greeting_without_tool_call_stays_direct():
 
     assert result == {}
     assert trace_data.route == 'direct'
+    assert trace_data.route_reason == 'model_direct'
 
 
 def test_simplify_answer_request_is_not_treated_as_legal_question():
@@ -232,3 +340,4 @@ async def test_simplify_answer_request_stays_direct():
 
     assert result == {}
     assert trace_data.route == 'direct'
+    assert trace_data.route_reason == 'model_direct'

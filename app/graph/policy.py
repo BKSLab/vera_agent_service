@@ -1,5 +1,7 @@
 """Кодовые policy-проверки графа (VERA-021)."""
 
+import re
+
 from langchain_core.messages import BaseMessage, HumanMessage
 
 UNSAFE_TOOL_CALL_RESPONSE = (
@@ -21,11 +23,48 @@ def contains_pseudo_tool_call(text: str) -> bool:
     normalized = ''.join(text.lower().split())
     return any(marker in normalized for marker in PSEUDO_TOOL_CALL_MARKERS)
 
+
+_FEDERAL_LAW_REFERENCE_RE = re.compile(
+    r'(?<![\w№])(?:№\s*)?\d{1,4}\s*[-‐‑–—]\s*фз\b|'
+    r'(?<!\w)фз\s*(?:№\s*|[-‐‑–—]\s*)\d{1,4}\b',
+    re.IGNORECASE,
+)
+
+_ARTICLE_WITH_CODE_REFERENCE_RE = re.compile(
+    r'(?:'
+    r'(?<!\w)(?:ст\.?\s*|стать(?:я|и|е|ю|ей|ёй)\s+)\d{1,4}(?:\.\d+)*\b'
+    r'[\s,;:()«»"\'/\-]{0,32}'
+    r'(?<!\w)(?:тк|гк|гпк|апк|коап|ук|упк|нк|ск|жк|зк|бк|кас)\s*рф\b'
+    r'|'
+    r'(?<!\w)(?:тк|гк|гпк|апк|коап|ук|упк|нк|ск|жк|зк|бк|кас)\s*рф\b'
+    r'[\s,;:()«»"\'/\-]{0,32}'
+    r'(?<!\w)(?:ст\.?\s*|стать(?:я|и|е|ю|ей|ёй)\s+)\d{1,4}(?:\.\d+)*\b'
+    r')',
+    re.IGNORECASE,
+)
+
+_ARTICLE_WORD_RE = re.compile(
+    r'(?<!\w)стать(?:я|и|е|ю|ей|ёй)(?!\w)',
+    re.IGNORECASE,
+)
+
+
+def contains_legal_reference(text: str) -> bool:
+    """Есть ли в тексте сильные реквизиты правовой нормы.
+
+    Номер федерального закона распознаётся самостоятельно. Ссылка на статью
+    считается правовой только рядом с обозначением кодекса, чтобы бытовые
+    фразы про статью, часть или пункт не форсировали поиск.
+    """
+    return bool(
+        _FEDERAL_LAW_REFERENCE_RE.search(text)
+        or _ARTICLE_WITH_CODE_REFERENCE_RE.search(text)
+    )
+
+
 _FACTUAL_LEGAL_KEYWORDS = (
     'закон',
     'кодекс',
-    'статья',
-    'статьи',
     'квота',
     'квоты',
     'право',
@@ -54,14 +93,19 @@ _FACTUAL_LEGAL_KEYWORDS = (
 фактический/правовой вопрос от общей реплики (приветствие, благодарность и
 т.п.). Список неполон по построению — это не замена классификации моделью,
 а страховка на случай, если модель решила ответить напрямую на вопрос,
-явно относящийся к базе знаний (VERA-021)."""
+явно относящийся к базе знаний (VERA-021). Формы слова «статья» проверяются
+отдельным regex с границами слова; «часть» и «пункт» самостоятельно не
+считаются достаточным признаком."""
 
 
 def is_probably_factual_or_legal_question(text: str) -> bool:
     """Похож ли вопрос пользователя на фактический/правовой запрос,
     прямой ответ на который мимо базы знаний недопустим (VERA-021)."""
     lowered = text.lower()
-    return any(keyword in lowered for keyword in _FACTUAL_LEGAL_KEYWORDS)
+    return bool(
+        any(keyword in lowered for keyword in _FACTUAL_LEGAL_KEYWORDS)
+        or _ARTICLE_WORD_RE.search(text)
+    )
 
 
 SIMPLIFY_ANSWER_REQUEST = 'Объясни предыдущий ответ проще'
