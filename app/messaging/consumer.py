@@ -697,6 +697,8 @@ class AgentRequestConsumer:
     @staticmethod
     def _finalize_root_span(span: Span, trace_data: AgentRequestTraceData) -> None:
         span.set_attribute('agent.route', trace_data.route)
+        if trace_data.route_reason is not None:
+            span.set_attribute('agent.route_reason', trace_data.route_reason)
         span.set_attribute('agent.search.required', trace_data.search_required)
         span.set_attribute('agent.search.unavailable', trace_data.search_unavailable)
         span.set_attribute('agent.search.chunk_count', trace_data.search_chunk_count)

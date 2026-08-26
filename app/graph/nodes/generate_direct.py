@@ -11,6 +11,7 @@ from app.core.settings import GraphContextSettings
 from app.exceptions.llm import EmptyLlmStreamError
 from app.graph.context_budget import build_bounded_messages
 from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE, contains_pseudo_tool_call
+from app.graph.prompts.context import NO_SEARCH_PERFORMED_INSTRUCTION
 from app.graph.prompts.system import FINAL_RESPONSE_SYSTEM_PROMPT
 from app.graph.state import AgentState
 from app.schemas.mcp_tool_results import ConsultationEmailToolResult
@@ -62,7 +63,11 @@ def create_generate_direct_node(
             max_turns=context_settings.context_max_turns,
             older_turns_summary_max_chars=context_settings.context_older_turns_summary_max_chars,
         )
-        messages = [SystemMessage(content=FINAL_RESPONSE_SYSTEM_PROMPT), *bounded_history]
+        messages = [
+            SystemMessage(content=FINAL_RESPONSE_SYSTEM_PROMPT),
+            *bounded_history,
+            SystemMessage(content=NO_SEARCH_PERFORMED_INSTRUCTION),
+        ]
 
         full_text = ''
         async for token in astream_tokens(chat_model, messages):

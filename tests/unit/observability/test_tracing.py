@@ -79,14 +79,21 @@ class _FakeConsultationEmailTool:
 
 
 class _FakeGraph:
-    def __init__(self, events: list[dict] | None = None, route: str = 'direct'):
+    def __init__(
+        self,
+        events: list[dict] | None = None,
+        route: str = 'direct',
+        route_reason: str | None = None,
+    ):
         self._events = events or []
         self._route = route
+        self._route_reason = route_reason
 
     def astream_events(self, state, config, version='v2'):
         async def _generator():
             trace_data = get_request_trace()
             trace_data.route = self._route
+            trace_data.route_reason = self._route_reason
             trace_data.search_required = self._route == 'knowledge_base'
             for event in self._events:
                 yield event
@@ -288,6 +295,22 @@ async def test_agent_root_can_be_created_without_full_content():
     serialized_attributes = str(dict(span.attributes))
     assert 'question' not in serialized_attributes
     assert 'AБ' not in serialized_attributes
+
+
+async def test_agent_root_records_legal_reference_route_reason():
+    graph = _FakeGraph(
+        [_stream_event('Ответ')],
+        route='knowledge_base',
+        route_reason='legal_reference',
+    )
+    consumer = _build_consumer(graph)
+
+    await consumer._handle_message(_FakeMessage())
+
+    roots = [span for span in _exporter.get_finished_spans() if span.name == 'vera.agent.request']
+    assert len(roots) == 1
+    assert roots[0].attributes['agent.route'] == 'knowledge_base'
+    assert roots[0].attributes['agent.route_reason'] == 'legal_reference'
 
 
 async def test_agent_root_records_question_and_answer():

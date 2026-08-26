@@ -157,8 +157,8 @@ class LlmSettings(SettingsBase):
 
     llm_api_key: SecretStr
     llm_api_url: str
-    llm_model: str
-    llm_temperature: float = 0.3
+    llm_model: str = 'google/gemini-3.7-flash'
+    llm_temperature: float | None = 0.3
 
 
 class McpSettings(SettingsBase):

@@ -79,15 +79,17 @@ def get_chat_model(httpx_client: httpx.AsyncClient, settings: LlmSettings) -> Ch
     astream_tokens, чтобы не задваивать retry-политику и логи двух разных
     механизмов.
     """
-    return ChatOpenAI(
-        model=settings.llm_model,
-        base_url=settings.llm_api_url,
-        api_key=settings.llm_api_key.get_secret_value(),
-        temperature=settings.llm_temperature,
-        http_async_client=httpx_client,
-        timeout=DEFAULT_TIMEOUT_SECONDS,
-        max_retries=0,
-    )
+    chat_model_kwargs: dict[str, object] = {
+        'model': settings.llm_model,
+        'base_url': settings.llm_api_url,
+        'api_key': settings.llm_api_key.get_secret_value(),
+        'http_async_client': httpx_client,
+        'timeout': DEFAULT_TIMEOUT_SECONDS,
+        'max_retries': 0,
+    }
+    if settings.llm_temperature is not None:
+        chat_model_kwargs['temperature'] = settings.llm_temperature
+    return ChatOpenAI(**chat_model_kwargs)
 
 
 def _get_backoff_delay(attempt: int) -> float:
