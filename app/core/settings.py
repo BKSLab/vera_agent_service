@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 from urllib.parse import quote
 
 from pydantic import Field, SecretStr, model_validator
@@ -159,6 +160,12 @@ class LlmSettings(SettingsBase):
     llm_api_url: str
     llm_model: str = 'google/gemini-3.7-flash'
     llm_temperature: float | None = 0.3
+    llm_reasoning_effort: Literal['low'] | None = None
+    """Опциональный режим Polza `reasoning={"effort": "low"}`.
+
+    По умолчанию не меняет payload. В production включается через
+    `LLM_REASONING_EFFORT=low`, поэтому режим можно откатить без правки кода.
+    """
 
 
 class McpSettings(SettingsBase):

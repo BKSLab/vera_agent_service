@@ -89,6 +89,16 @@ def get_chat_model(httpx_client: httpx.AsyncClient, settings: LlmSettings) -> Ch
     }
     if settings.llm_temperature is not None:
         chat_model_kwargs['temperature'] = settings.llm_temperature
+    if settings.llm_reasoning_effort is not None:
+        # `reasoning` — расширение Polza для Chat Completions. Передаём его
+        # через `extra_body`: openai SDK не знает этого именованного аргумента,
+        # а поле ChatOpenAI.reasoning автоматически переключило бы запрос на
+        # Responses API и изменило бы существующий контракт агента.
+        chat_model_kwargs['extra_body'] = {
+            'reasoning': {
+                'effort': settings.llm_reasoning_effort,
+            }
+        }
     return ChatOpenAI(**chat_model_kwargs)
 
 

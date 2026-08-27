@@ -339,6 +339,40 @@ async def test_empty_chunks_produces_honest_refusal_not_error():
         assert 'нет ответа' in final_message.content
 
 
+async def test_reference_only_invalid_article_skips_intent_and_keeps_empty_result_honest():
+    """CHAT-02: несуществующая точная ссылка идёт в RAG без intent-LLM,
+    а пустой результат не превращается в ответ модели по памяти."""
+    app = create_mock_mcp_app(chunks=[])
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(
+            mcp_server_url=url,
+            mcp_call_timeout_seconds=5.0,
+            mcp_call_retries=1,
+        )
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(mcp_client, retries=1, timeout_seconds=5.0)
+        calls = {'intent': 0, 'generation': 0}
+
+        def handler(request):
+            payload = json.loads(request.content)
+            if not payload.get('stream'):
+                calls['intent'] += 1
+                return _direct_completion('Этот вызов не должен выполняться.')
+            calls['generation'] += 1
+            return _stream_response(['В базе знаний нет информации по указанной норме.'])
+
+        chat_model = _build_chat_model(handler)
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        result = await graph.ainvoke(_initial_state('п. 1 ч. 1 ст. 999 ТК РФ'))
+
+        assert calls == {'intent': 0, 'generation': 1}
+        assert result['tool_calls'] == ['vera_rag_kb']
+        assert result['retrieved_chunks'] == []
+        assert result['search_unavailable'] is False
+        assert 'нет информации' in result['messages'][-1].content
+
+
 async def test_first_token_arrives_quickly_against_mocked_llm():
     """Ранняя проверка плотности графа (Этап 4.7) — не финальный замер TTFT
     (провайдер и MCP настоящие только в проде, полноценный замер — Этап

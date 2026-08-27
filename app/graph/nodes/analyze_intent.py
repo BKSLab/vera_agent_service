@@ -16,6 +16,7 @@ from app.graph.policy import (
     contains_legal_reference,
     find_last_human_message,
     is_probably_factual_or_legal_question,
+    is_reference_only,
 )
 from app.graph.prompts.system import SYSTEM_PROMPT
 from app.graph.state import AgentState
@@ -25,6 +26,10 @@ FORCED_KB_SEARCH_TOOL_CALL_ID = 'forced-kb-search'
 """ID синтетического `tool_call`, которым код принудительно направляет
 фактический/правовой вопрос в поиск по базе знаний, даже если модель решила
 ответить напрямую (VERA-021)."""
+
+REFERENCE_ONLY_KB_SEARCH_TOOL_CALL_ID = 'reference-only-kb-search'
+"""ID детерминированного `tool_call` для реплики, целиком состоящей из
+реквизитов нормы. Такая реплика не требует intent-LLM."""
 
 
 def create_analyze_intent_node(
@@ -55,6 +60,32 @@ def create_analyze_intent_node(
     )
 
     async def analyze_intent(state: AgentState) -> dict:
+        trace_data = get_request_trace()
+        last_human = find_last_human_message(state['messages'])
+        if (
+            last_human is not None
+            and isinstance(last_human.content, str)
+            and is_reference_only(last_human.content)
+        ):
+            if trace_data is not None:
+                trace_data.route = 'knowledge_base'
+                trace_data.route_reason = 'reference_only'
+                trace_data.search_required = True
+            return {
+                'messages': [
+                    AIMessage(
+                        content='',
+                        tool_calls=[
+                            {
+                                'id': REFERENCE_ONLY_KB_SEARCH_TOOL_CALL_ID,
+                                'name': VERA_RAG_KB_TOOL_NAME,
+                                'args': {'query': last_human.content},
+                            }
+                        ],
+                    )
+                ]
+            }
+
         bounded_history = build_bounded_messages(
             state['messages'],
             max_turns=context_settings.context_max_turns,
@@ -62,7 +93,6 @@ def create_analyze_intent_node(
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), *bounded_history]
         response = await ainvoke_with_retry(model_with_tools, messages)
-        trace_data = get_request_trace()
 
         if response.tool_calls:
             tool_call = response.tool_calls[0]
@@ -79,7 +109,6 @@ def create_analyze_intent_node(
             trace_data.route = 'direct'
             trace_data.route_reason = 'model_direct'
 
-        last_human = find_last_human_message(state['messages'])
         has_legal_reference = (
             last_human is not None
             and isinstance(last_human.content, str)
