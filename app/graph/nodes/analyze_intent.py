@@ -17,6 +17,7 @@ from app.graph.policy import (
     find_last_human_message,
     is_probably_factual_or_legal_question,
     is_reference_only,
+    is_simplify_answer_request,
 )
 from app.graph.prompts.system import SYSTEM_PROMPT
 from app.graph.state import AgentState
@@ -50,6 +51,11 @@ def create_analyze_intent_node(
 
     Отказ модели от поиска по базе знаний на фактическом/правовом вопросе
     дополнительно проверяется кодом (VERA-021).
+
+    Два консервативных случая пропускают intent-LLM детерминированно: реплика,
+    целиком состоящая из реквизитов нормы, сразу направляется в RAG; точный
+    текст кнопки «Объяснить проще» после финального ответа сразу направляется
+    в `generate_direct`.
 
     Модели передаётся не вся `state['messages']`, а ограниченное по
     бюджету представление (`context_settings`, VERA-020) — полная история
@@ -85,6 +91,12 @@ def create_analyze_intent_node(
                     )
                 ]
             }
+
+        if is_simplify_answer_request(state['messages']):
+            if trace_data is not None:
+                trace_data.route = 'direct'
+                trace_data.route_reason = 'simplify_request'
+            return {}
 
         bounded_history = build_bounded_messages(
             state['messages'],

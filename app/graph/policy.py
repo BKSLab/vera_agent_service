@@ -2,7 +2,7 @@
 
 import re
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 UNSAFE_TOOL_CALL_RESPONSE = (
     'Не удалось сформировать безопасный ответ. Попробуйте повторить запрос позже.'
@@ -162,10 +162,11 @@ SIMPLIFY_ANSWER_REQUEST = 'Объясни предыдущий ответ про
 """Текст, который сайт подставляет по кнопке «Объяснить проще» под ответом,
 построенным на базе знаний.
 
-Агент не отличает эту реплику от набранной вручную: кнопка отправляет её
-обычным пользовательским сообщением по общему маршруту, поэтому отдельной
-ветки графа, поля в контракте очереди и правок системного промпта здесь нет —
-сценарий уже описан в `STYLE_PROMPT`.
+Кнопка отправляет обычное пользовательское сообщение: отдельного поля в
+контракте очереди, узла или ребра графа нет. Однако точная строка может
+детерминированно пропустить intent-LLM, если непосредственно перед ней есть
+финальный видимый ответ ассистента. Само упрощение по-прежнему выполняет
+`generate_direct` по правилам `STYLE_PROMPT`.
 
 Формулировка не случайна и не должна меняться без проверки: ни одно слово из
 `_FACTUAL_LEGAL_KEYWORDS` в ней встречаться не может. Иначе VERA-021 сочтёт
@@ -173,6 +174,40 @@ SIMPLIFY_ANSWER_REQUEST = 'Объясни предыдущий ответ про
 `vera_rag_kb` и вернёт второй ответ по базе знаний вместо переформулировки
 предыдущего. Инвариант закреплён тестом; фронтенд обязан отправлять ровно эту
 строку (`frontend/src/hooks/useVeraChat.ts`)."""
+
+
+def is_simplify_answer_request(messages: list[BaseMessage]) -> bool:
+    """Можно ли безопасно пропустить intent-LLM для кнопки упрощения.
+
+    Совпадение текста намеренно точное: свободные формулировки продолжает
+    классифицировать модель. Ближайший предыдущий `AIMessage` обязан быть
+    непустым финальным ответом без `tool_calls`. Через пустой служебный
+    AIMessage от незавершённого turn'а к более старому ответу не перескакиваем.
+    """
+    if not messages or not isinstance(messages[-1], HumanMessage):
+        return False
+
+    current_message = messages[-1]
+    if (
+        not isinstance(current_message.content, str)
+        or current_message.content != SIMPLIFY_ANSWER_REQUEST
+    ):
+        return False
+
+    previous_ai = next(
+        (
+            message
+            for message in reversed(messages[:-1])
+            if isinstance(message, AIMessage)
+        ),
+        None,
+    )
+    return bool(
+        previous_ai is not None
+        and isinstance(previous_ai.content, str)
+        and previous_ai.content.strip()
+        and not previous_ai.tool_calls
+    )
 
 
 def find_last_human_message(messages: list[BaseMessage]) -> HumanMessage | None:

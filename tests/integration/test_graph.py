@@ -17,6 +17,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from app.clients.mcp_client import get_mcp_client, get_tools_with_retry
 from app.core.settings import GraphContextSettings, McpSettings
 from app.graph.build import build_graph
+from app.graph.policy import SIMPLIFY_ANSWER_REQUEST
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.tracing import reset_for_tests
@@ -371,6 +372,94 @@ async def test_reference_only_invalid_article_skips_intent_and_keeps_empty_resul
         assert result['retrieved_chunks'] == []
         assert result['search_unavailable'] is False
         assert 'нет информации' in result['messages'][-1].content
+
+
+async def test_simplify_button_skips_second_intent_call_and_keeps_previous_answer():
+    """После RAG-ответа точная строка кнопки вызывает только generate_direct."""
+    chunks = [
+        {
+            'chunk_id': 'article-128',
+            'source_title': 'ТК РФ, Статья 128',
+            'text': 'Работающему инвалиду положено до 60 календарных дней.',
+        }
+    ]
+    app = create_mock_mcp_app(chunks=chunks)
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(
+            mcp_server_url=url,
+            mcp_call_timeout_seconds=5.0,
+            mcp_call_retries=1,
+        )
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(
+            mcp_client,
+            retries=1,
+            timeout_seconds=5.0,
+        )
+        calls = {'intent': 0, 'generation': 0}
+        generation_payloads: list[dict] = []
+        original_answer = (
+            'Работающему инвалиду положено до 60 календарных дней. '
+            'Основание: статья 128 ТК РФ.'
+        )
+        simplified_answer = (
+            'Проще: можно взять до 60 календарных дней. '
+            'Основание: статья 128 ТК РФ.'
+        )
+
+        def handler(request):
+            payload = json.loads(request.content)
+            if not payload.get('stream'):
+                calls['intent'] += 1
+                if calls['intent'] > 1:
+                    pytest.fail('Кнопка упрощения не должна повторно вызывать intent-LLM')
+                return _tool_call_completion(
+                    'vera_rag_kb',
+                    {'query': 'отпуск без сохранения зарплаты для инвалида'},
+                )
+
+            calls['generation'] += 1
+            generation_payloads.append(payload)
+            pieces = (
+                [original_answer]
+                if calls['generation'] == 1
+                else [simplified_answer]
+            )
+            return _stream_response(pieces)
+
+        chat_model = _build_chat_model(handler)
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        turn1 = await graph.ainvoke(
+            _initial_state(
+                'Сколько дней отпуска без сохранения зарплаты положено '
+                'работающему инвалиду?'
+            )
+        )
+        turn2 = await graph.ainvoke(
+            {
+                'session_id': 's',
+                'user_id': None,
+                'messages': [
+                    *turn1['messages'],
+                    HumanMessage(content=SIMPLIFY_ANSWER_REQUEST),
+                ],
+                'retrieved_chunks': [],
+                'tool_calls': [],
+                'search_unavailable': False,
+            }
+        )
+
+    assert calls == {'intent': 1, 'generation': 2}
+    assert turn2['tool_calls'] == []
+    assert turn2['retrieved_chunks'] == []
+    assert turn2['messages'][-1].content == simplified_answer
+    second_generation_contents = [
+        message.get('content')
+        for message in generation_payloads[1]['messages']
+    ]
+    assert original_answer in second_generation_contents
+    assert SIMPLIFY_ANSWER_REQUEST in second_generation_contents
 
 
 async def test_first_token_arrives_quickly_against_mocked_llm():

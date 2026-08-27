@@ -2,7 +2,7 @@ import json
 
 import httpx
 import pytest
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import tool
 
 from app.core.settings import GraphContextSettings
@@ -12,6 +12,7 @@ from app.graph.policy import (
     contains_legal_reference,
     is_probably_factual_or_legal_question,
     is_reference_only,
+    is_simplify_answer_request,
 )
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -445,11 +446,106 @@ def test_simplify_answer_request_is_not_treated_as_legal_question():
     assert is_probably_factual_or_legal_question(SIMPLIFY_ANSWER_REQUEST) is False
 
 
-async def test_simplify_answer_request_stays_direct():
-    """Просьба упростить ответ идёт в `generate_direct` и переформулирует
-    предыдущий ответ по истории, а не переспрашивает базу знаний."""
+def test_simplify_answer_request_requires_previous_final_ai_answer():
+    completed_history = [
+        HumanMessage(content='Первоначальный вопрос'),
+        AIMessage(content='Финальный ответ. Основание: статья 128 ТК РФ.'),
+        HumanMessage(content=SIMPLIFY_ANSWER_REQUEST),
+    ]
+    assert is_simplify_answer_request(completed_history) is True
+    assert is_simplify_answer_request([HumanMessage(content=SIMPLIFY_ANSWER_REQUEST)]) is False
+    assert is_simplify_answer_request(
+        [
+            HumanMessage(content='Первоначальный вопрос'),
+            AIMessage(content=''),
+            HumanMessage(content=SIMPLIFY_ANSWER_REQUEST),
+        ]
+    ) is False
+
+
+def test_simplify_answer_request_does_not_skip_nearest_tool_call_ai_message():
+    messages = [
+        HumanMessage(content='Старый вопрос'),
+        AIMessage(content='Старый завершённый ответ.'),
+        HumanMessage(content='Незавершённый вопрос'),
+        AIMessage(
+            content='',
+            tool_calls=[
+                {
+                    'id': 'unfinished-call',
+                    'name': 'vera_rag_kb',
+                    'args': {'query': 'Незавершённый вопрос'},
+                }
+            ],
+        ),
+        HumanMessage(content=SIMPLIFY_ANSWER_REQUEST),
+    ]
+
+    assert is_simplify_answer_request(messages) is False
+
+
+@pytest.mark.parametrize(
+    'request_text',
+    (
+        f'{SIMPLIFY_ANSWER_REQUEST}.',
+        SIMPLIFY_ANSWER_REQUEST.lower(),
+        f' {SIMPLIFY_ANSWER_REQUEST}',
+        f'{SIMPLIFY_ANSWER_REQUEST} пожалуйста',
+    ),
+)
+def test_simplify_answer_request_matches_only_exact_button_text(request_text):
+    messages = [
+        HumanMessage(content='Первоначальный вопрос'),
+        AIMessage(content='Финальный ответ.'),
+        HumanMessage(content=request_text),
+    ]
+
+    assert is_simplify_answer_request(messages) is False
+
+
+async def test_simplify_answer_request_bypasses_intent_after_final_answer():
+    """Точная строка кнопки идёт в `generate_direct` без intent-LLM."""
+    def fail_if_called(request):
+        pytest.fail('simplify_request не должен вызывать intent-LLM')
+
+    chat_model = chat_model_with_handler(fail_if_called, streaming=False)
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+    state = _state_with_messages(
+        [
+            HumanMessage(content='Первоначальный вопрос'),
+            AIMessage(content='Финальный ответ. Основание: статья 128 ТК РФ.'),
+            HumanMessage(content=SIMPLIFY_ANSWER_REQUEST),
+        ]
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(state)
+    finally:
+        reset_request_trace(token)
+
+    assert result == {}
+    assert trace_data.route == 'direct'
+    assert trace_data.route_reason == 'simplify_request'
+    assert trace_data.search_required is False
+
+
+async def test_simplify_without_previous_answer_uses_model_direct():
+    """Без предыдущего финального ответа решение остаётся за intent-LLM."""
+    calls = {'count': 0}
+
+    def handler(request):
+        calls['count'] += 1
+        return _direct_response('Предыдущего ответа нет.')
+
     chat_model = chat_model_with_handler(
-        lambda request: _direct_response('Если коротко: работодатель обязан.'),
+        handler,
         streaming=False,
     )
     node = create_analyze_intent_node(chat_model, vera_rag_kb, send_consultation_email, _CONTEXT_SETTINGS)
@@ -462,5 +558,41 @@ async def test_simplify_answer_request_stays_direct():
         reset_request_trace(token)
 
     assert result == {}
+    assert calls['count'] == 1
+    assert trace_data.route == 'direct'
+    assert trace_data.route_reason == 'model_direct'
+
+
+async def test_dotted_simplify_request_keeps_existing_model_route():
+    calls = {'count': 0}
+
+    def handler(request):
+        calls['count'] += 1
+        return _direct_response('Упрощу предыдущий ответ.')
+
+    chat_model = chat_model_with_handler(handler, streaming=False)
+    node = create_analyze_intent_node(
+        chat_model,
+        vera_rag_kb,
+        send_consultation_email,
+        _CONTEXT_SETTINGS,
+    )
+    state = _state_with_messages(
+        [
+            HumanMessage(content='Первоначальный вопрос'),
+            AIMessage(content='Финальный ответ.'),
+            HumanMessage(content=f'{SIMPLIFY_ANSWER_REQUEST}.'),
+        ]
+    )
+
+    trace_data = AgentRequestTraceData()
+    token = set_request_trace(trace_data)
+    try:
+        result = await node(state)
+    finally:
+        reset_request_trace(token)
+
+    assert result == {}
+    assert calls['count'] == 1
     assert trace_data.route == 'direct'
     assert trace_data.route_reason == 'model_direct'
