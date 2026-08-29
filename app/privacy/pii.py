@@ -5,6 +5,7 @@ LLM получают стабильные маркеры, а email восста�
 перед вызовом мутирующего MCP-инструмента.
 """
 
+import logging
 import re
 import warnings
 from collections.abc import Iterator
@@ -17,6 +18,8 @@ from natasha import Doc, NewsEmbedding, NewsNERTagger, Segmenter
 from yargy import Parser, and_, or_, rule
 from yargy.predicates import eq, gram, length_eq
 from yargy.predicates import type as token_type
+
+logger = logging.getLogger('vera_agent_service')
 
 EMAIL_KIND = 'EMAIL'
 PERSON_KIND = 'PERSON'
@@ -211,22 +214,26 @@ class PiiRedactor:
         )
         return entities
 
-    def _person_entities(self, text: str) -> list[_DetectedPii]:
+    def _person_entities(
+        self,
+        text: str,
+    ) -> tuple[list[_DetectedPii], int]:
         document = Doc(text)
         document.segment(self._segmenter)
         document.tag_ner(self._ner_tagger)
-        return [
+        candidates = [span for span in document.spans if span.type == 'PER']
+        entities = [
             _DetectedPii(span.start, span.stop, PERSON_KIND, span.text, 10)
-            for span in document.spans
+            for span in candidates
             if (
-                span.type == 'PER'
-                and span.text.casefold() not in _SAFE_PERSON_ENTITIES
+                span.text.casefold() not in _SAFE_PERSON_ENTITIES
                 and (
                     len(span.text.split()) >= 2
                     or _SELF_IDENTIFICATION_PREFIX.search(text[:span.start]) is not None
                 )
             )
         ]
+        return entities, len(candidates)
 
     def _is_standalone_person(self, value: str) -> bool:
         """Проверяет редкое имя, которое морфологический словарь не знает."""
@@ -306,13 +313,36 @@ class PiiRedactor:
     def redact(self, text: str, context: PiiRedactionContext) -> str:
         if not text:
             return text
+        regex_entities = self._regex_entities(text)
+        contextual_entities = self._contextual_person_entities(text)
+        person_entities, natasha_candidate_count = self._person_entities(text)
         entities = self._without_overlaps(
             [
-                *self._regex_entities(text),
-                *self._contextual_person_entities(text),
-                *self._person_entities(text),
+                *regex_entities,
+                *contextual_entities,
+                *person_entities,
             ]
         )
+        if regex_entities or contextual_entities or natasha_candidate_count:
+            type_counts: dict[str, int] = {}
+            for entity in entities:
+                label = _PLACEHOLDER_LABELS[entity.kind]
+                type_counts[label] = type_counts.get(label, 0) + 1
+            types_summary = ', '.join(
+                f'{label}={count}' for label, count in sorted(type_counts.items())
+            ) or 'нет'
+            logger.info(
+                '🛡️ Проверка ПДн: строгие правила=%d, Yargy=%d, '
+                'Natasha PER=%d, принято фильтром=%d, отклонено=%d, '
+                'заменено=%d, типы: %s.',
+                len(regex_entities),
+                len(contextual_entities),
+                natasha_candidate_count,
+                len(person_entities),
+                natasha_candidate_count - len(person_entities),
+                len(entities),
+                types_summary,
+            )
         if not entities:
             return text
 

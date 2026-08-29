@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from app.privacy.pii import (
@@ -272,3 +274,54 @@ def test_person_aliases_are_isolated_between_request_scopes():
     assert first_scope_first.endswith('[ФИО_1]')
     assert first_scope_second.endswith('[ФИО_2]')
     assert second_scope_first.endswith('[ФИО_1]')
+
+
+def test_redaction_logs_pipeline_counts_without_personal_values(caplog):
+    text = 'ок, спасибо! я, кстати, Кирилл инвалид по зрению'
+    caplog.set_level(logging.INFO, logger='vera_agent_service')
+
+    with pii_redaction_scope():
+        redact_pii_text(text)
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == 'vera_agent_service'
+    ]
+    assert messages == [
+        '🛡️ Проверка ПДн: строгие правила=0, Yargy=1, '
+        'Natasha PER=1, принято фильтром=1, отклонено=0, '
+        'заменено=1, типы: ФИО=1.'
+    ]
+    assert 'Кирилл' not in caplog.text
+    assert text not in caplog.text
+
+
+def test_redaction_logs_rejected_natasha_false_positive_without_value(caplog):
+    text = 'Объясни предыдущий ответ проще'
+    caplog.set_level(logging.INFO, logger='vera_agent_service')
+
+    with pii_redaction_scope():
+        redacted = redact_pii_text(text)
+
+    assert redacted == text
+    assert 'Natasha PER=1' in caplog.text
+    assert 'принято фильтром=0' in caplog.text
+    assert 'отклонено=1' in caplog.text
+    assert 'заменено=0' in caplog.text
+    assert 'Объясни' not in caplog.text
+    assert text not in caplog.text
+
+
+def test_redaction_does_not_log_when_pipeline_finds_no_pii(caplog):
+    caplog.set_level(logging.INFO, logger='vera_agent_service')
+
+    with pii_redaction_scope():
+        redacted = redact_pii_text('Когда начинается отпуск?')
+
+    assert redacted == 'Когда начинается отпуск?'
+    assert not [
+        record
+        for record in caplog.records
+        if record.name == 'vera_agent_service'
+    ]
