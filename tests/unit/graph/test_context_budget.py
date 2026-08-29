@@ -163,3 +163,23 @@ def test_lowercase_name_from_legacy_history_is_redacted_before_model_call():
     assert result[0].content == (
         'меня зовут [ФИО_1] помогите с увольнением'
     )
+
+
+def test_name_after_self_identification_aside_is_redacted_in_legacy_history():
+    messages = [
+        HumanMessage(
+            content='ок, спасибо! я, кстати, Кирилл инвалид по зрению'
+        ),
+        AIMessage(content='Чем вам помочь?'),
+    ]
+
+    with pii_redaction_scope():
+        result = build_bounded_messages(
+            messages,
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+    assert result[0].content == (
+        'ок, спасибо! я, кстати, [ФИО_1] инвалид по зрению'
+    )

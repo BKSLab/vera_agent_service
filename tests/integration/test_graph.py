@@ -293,6 +293,47 @@ async def test_greeting_goes_directly_to_generate_direct_without_mcp_call():
         assert final_message.content == 'Здравствуйте! Чем могу помочь?'
 
 
+async def test_name_after_self_identification_aside_is_hidden_from_every_llm_call():
+    app = create_mock_mcp_app(
+        fail_message='vera_rag_kb не должен вызываться для знакомства'
+    )
+    async with run_mock_mcp_server(app) as url:
+        mcp_settings = McpSettings(
+            mcp_server_url=url,
+            mcp_call_timeout_seconds=5.0,
+            mcp_call_retries=1,
+        )
+        mcp_client = get_mcp_client(mcp_settings)
+        tools = await get_tools_with_retry(
+            mcp_client,
+            retries=1,
+            timeout_seconds=5.0,
+        )
+        llm_payloads: list[str] = []
+
+        def handler(request):
+            payload = json.loads(request.content)
+            llm_payloads.append(json.dumps(payload['messages'], ensure_ascii=False))
+            if not payload.get('stream'):
+                return _direct_completion('ok')
+            return _stream_response(['Рада познакомиться!'])
+
+        chat_model = _build_chat_model(handler)
+        graph = _compile_graph(chat_model, tools, mcp_settings)
+
+        with pii_redaction_scope():
+            result = await graph.ainvoke(
+                _initial_state(
+                    'ок, спасибо! я, кстати, Кирилл инвалид по зрению'
+                )
+            )
+
+        assert len(llm_payloads) == 2
+        assert all('Кирилл' not in payload for payload in llm_payloads)
+        assert all('[ФИО_1]' in payload for payload in llm_payloads)
+        assert result['messages'][-1].content == 'Рада познакомиться!'
+
+
 async def test_mcp_unavailable_degrades_gracefully_without_raising():
     app = create_mock_mcp_app(fail_message='RAG Service недоступен (мок)')
     async with run_mock_mcp_server(app) as url:

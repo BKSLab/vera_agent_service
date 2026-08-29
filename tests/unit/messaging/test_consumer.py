@@ -225,6 +225,31 @@ async def test_consumer_redacts_lowercase_name_after_context_marker():
     )
 
 
+async def test_consumer_redacts_name_after_self_identification_aside():
+    graph = _FakeGraph([[_token_event('Ответ')]])
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(
+        body=json.dumps(
+            {
+                'session_id': 'conversation-1',
+                'request_id': 'request-1',
+                'user_id': 'u1',
+                'message': (
+                    'ок, спасибо! я, кстати, Кирилл инвалид по зрению'
+                ),
+            },
+            ensure_ascii=False,
+        ).encode(),
+    )
+
+    await consumer._handle_message(message)
+
+    assert graph.states[0]['messages'][0].content == (
+        'ок, спасибо! я, кстати, [ФИО_1] инвалид по зрению'
+    )
+
+
 async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():
     graph = _FakeGraph(
         [

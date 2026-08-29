@@ -56,7 +56,14 @@ _EXPLICIT_PERSON_MARKER_PATTERN = re.compile(
     r'|\bфамилия\s*,?\s*имя\s*,?\s*отчество\b(?=\s*[:—-])'
     r')\s*(?::|[-—])?\s*'
 )
-_I_AM_PERSON_MARKER_PATTERN = re.compile(r'(?i)\bя\s*(?::|[-—])\s*')
+_SELF_IDENTIFICATION_ASIDE_PATTERN = (
+    r'(?:кстати|вообще(?:-то)?|между\s+прочим|если\s+что|на\s+самом\s+деле)'
+)
+_I_AM_PERSON_MARKER_PATTERN = re.compile(
+    rf'(?ix)\bя'
+    rf'(?:\s*,?\s*{_SELF_IDENTIFICATION_ASIDE_PATTERN}\s*,?)?'
+    r'\s*(?::|[-—])?\s*'
+)
 _NAME_OPENING_DELIMITER_PATTERN = re.compile(r'''[\s«„“"'(]*''')
 _FALLBACK_PERSON_COMPONENT_PATTERN = re.compile(
     r'(?:[А-ЯЁа-яёA-Za-z]{2,}'
@@ -65,7 +72,11 @@ _FALLBACK_PERSON_COMPONENT_PATTERN = re.compile(
 )
 _SAFE_PERSON_ENTITIES = frozenset({'вера'})
 _SELF_IDENTIFICATION_PREFIX = re.compile(
-    r'(?i)(?:\bя|\bменя\s+зовут|\bмо[её]\s+имя)\s*(?:[-—:]\s*)?$'
+    rf'(?ix)(?:'
+    rf'\bя(?:\s*,?\s*{_SELF_IDENTIFICATION_ASIDE_PATTERN}\s*,?)?'
+    r'|\bменя\s+зовут'
+    r'|\bмо[её]\s+имя'
+    r')\s*(?:[-—:]\s*)?$'
 )
 
 # Yargy использует морфологию, поэтому распознаёт имена, фамилии и отчества
@@ -235,6 +246,8 @@ class PiiRedactor:
         Yargy принимает только морфологически похожие на ФИО токены (либо
         неизвестные/латинские слова непосредственно после маркера). Поэтому
         конструкции ``я хочу`` и ``меня зовут на работу`` не маскируются.
+        Между ``я`` и именем допускаются короткие вводные обороты вроде
+        ``кстати``: они не должны отменять уже распознанное имя.
         """
 
         entities: list[_DetectedPii] = []
