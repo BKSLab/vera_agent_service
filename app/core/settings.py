@@ -188,9 +188,10 @@ class McpSettings(SettingsBase):
 class GraphContextSettings(SettingsBase):
     """Бюджет контекста, передаваемого модели графом (VERA-020).
 
-    Полная история диалога продолжает накапливаться в Redis-checkpoint'е и
-    в PostgreSQL без ограничения — эти настройки ограничивают только то,
-    что уходит в конкретный вызов LLM (`app/graph/context_budget.py`).
+    История диалога продолжает накапливаться в Redis-checkpoint'е и в
+    PostgreSQL без ограничения — эти настройки ограничивают только то,
+    что уходит в конкретный вызов LLM (`app/graph/context_budget.py`). Новые
+    пользовательские сообщения сохраняются в Redis уже обезличенными.
     """
 
     context_max_turns: int = Field(default=12, ge=1)

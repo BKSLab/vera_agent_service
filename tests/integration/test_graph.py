@@ -21,6 +21,7 @@ from app.graph.policy import SIMPLIFY_ANSWER_REQUEST
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.tracing import reset_for_tests
+from app.privacy.pii import pii_redaction_scope
 from tests.fixtures.mock_mcp_server import create_mock_mcp_app, run_mock_mcp_server
 
 pytestmark = pytest.mark.integration
@@ -523,14 +524,15 @@ async def test_consultation_email_follows_model_decision_without_confirmation_gu
                     for message in payload['messages']
                     if message['role'] == 'user'
                 ][-1]['content']
-                if email not in last_user_message:
+                if '[EMAIL_1]' not in last_user_message:
                     return _direct_completion('Нужен email')
+                assert email not in last_user_message
                 return _tool_call_completion(
                     'send_consultation_email',
                     {
                         'consultation_text': consultation_text,
                         'consultation_topic': 'Трудовые права',
-                        'email': email,
+                        'email': '[EMAIL_1]',
                     },
                 )
             return _stream_response(['Укажите email для отправки консультации.'])
@@ -552,7 +554,8 @@ async def test_consultation_email_follows_model_decision_without_confirmation_gu
             'tool_calls': [],
             'search_unavailable': False,
         }
-        turn2 = await graph.ainvoke(turn2_state)
+        with pii_redaction_scope():
+            turn2 = await graph.ainvoke(turn2_state)
 
         assert requests == [
             {
@@ -591,12 +594,15 @@ async def test_automatic_email_spans_record_consultation_and_recipient():
         def handler(request):
             payload = json.loads(request.content)
             if not payload.get('stream'):
+                serialized_messages = json.dumps(payload['messages'], ensure_ascii=False)
+                assert recipient not in serialized_messages
+                assert '[EMAIL_1]' in serialized_messages
                 return _tool_call_completion(
                     'send_consultation_email',
                     {
                         'consultation_text': consultation_text,
                         'consultation_topic': 'Трудовые права',
-                        'email': recipient,
+                        'email': '[EMAIL_1]',
                     },
                 )
             return _stream_response(['Документ отправлен.'])
@@ -604,9 +610,10 @@ async def test_automatic_email_spans_record_consultation_and_recipient():
         chat_model = _build_chat_model(handler)
         graph = _compile_graph(chat_model, tools, mcp_settings)
 
-        await graph.ainvoke(
-            _initial_state(f'Отправь итоговую консультацию на {recipient}')
-        )
+        with pii_redaction_scope():
+            await graph.ainvoke(
+                _initial_state(f'Отправь итоговую консультацию на {recipient}')
+            )
 
     assert requests == [
         {

@@ -36,6 +36,7 @@ from app.observability.request_trace import (
     set_request_trace,
 )
 from app.observability.tracing import get_tracer
+from app.privacy.pii import pii_redaction_scope, redact_pii_text
 from app.services.chat_persistence import (
     START_DUPLICATE_IN_PROGRESS,
     START_DUPLICATE_TERMINAL,
@@ -175,7 +176,12 @@ def _initial_state(payload: AgentRequestMessage) -> dict:
     return {
         'session_id': payload.session_id,
         'user_id': payload.user_id,
-        'messages': [HumanMessage(content=payload.message, id=payload.request_id)],
+        'messages': [
+            HumanMessage(
+                content=redact_pii_text(payload.message),
+                id=payload.request_id,
+            )
+        ],
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
@@ -410,7 +416,11 @@ class AgentRequestConsumer:
                 trace_data.outcome = 'duplicate_processing'
                 return
 
-        await self._process_claimed_turn(delivery, payload, span, trace_data)
+        # PostgreSQL сохраняет исходный вопрос согласно продуктовому контракту,
+        # но в LangGraph/LLM попадает только обезличенная копия. Соответствия
+        # маркеров существуют лишь до завершения текущей обработки.
+        with pii_redaction_scope():
+            await self._process_claimed_turn(delivery, payload, span, trace_data)
 
     async def _replay_terminal_outcome(
         self,

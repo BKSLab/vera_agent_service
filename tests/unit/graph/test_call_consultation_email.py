@@ -4,6 +4,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from app.core.settings import McpSettings
 from app.graph.nodes.call_consultation_email import (
+    UNRESOLVED_EMAIL_RESULT,
     create_call_consultation_email_node,
 )
 from app.observability.request_trace import (
@@ -11,6 +12,7 @@ from app.observability.request_trace import (
     reset_request_trace,
     set_request_trace,
 )
+from app.privacy.pii import pii_redaction_scope, redact_pii_text
 
 
 class _FakeConsultationEmailTool:
@@ -30,7 +32,10 @@ class _FakeConsultationEmailTool:
         return self._result
 
 
-def _state(consultation_text: str = 'Полный текст консультации') -> dict:
+def _state(
+    consultation_text: str = 'Полный текст консультации',
+    email: str = 'user@example.com',
+) -> dict:
     return {
         'session_id': 's',
         'user_id': None,
@@ -44,7 +49,7 @@ def _state(consultation_text: str = 'Полный текст консульта�
                         'name': 'send_consultation_email',
                         'args': {
                             'consultation_text': consultation_text,
-                            'email': 'user@example.com',
+                            'email': email,
                         },
                     }
                 ],
@@ -134,3 +139,48 @@ async def test_unexpected_result_is_not_reported_as_success():
     assert payload['status'] == 'error'
     assert payload['code'] == 'unexpected_tool_result'
     assert trace_data.consultation_email_status == 'error'
+
+
+async def test_email_alias_is_restored_only_immediately_before_tool_call():
+    email = 'private.user@example.com'
+    tool_result = {'status': 'ok', 'email': email}
+    tool = _FakeConsultationEmailTool(result=tool_result)
+    node = create_call_consultation_email_node(
+        tool,
+        McpSettings(mcp_consultation_email_timeout_seconds=1.0),
+    )
+
+    with pii_redaction_scope():
+        redacted = redact_pii_text(f'Отправь консультацию на {email}')
+        assert email not in redacted
+        result = await node(_state(email='[EMAIL_1]'))
+
+    assert tool.arguments == [
+        {
+            'consultation_text': 'Полный текст консультации',
+            'email': email,
+        }
+    ]
+    assert json.loads(result['messages'][0].content) == tool_result
+
+
+async def test_unknown_email_alias_is_blocked_without_mcp_call():
+    tool = _FakeConsultationEmailTool(result={'status': 'ok'})
+    node = create_call_consultation_email_node(
+        tool,
+        McpSettings(mcp_consultation_email_timeout_seconds=1.0),
+    )
+    trace_data = AgentRequestTraceData()
+    trace_token = set_request_trace(trace_data)
+    try:
+        with pii_redaction_scope():
+            result = await node(_state(email='[EMAIL_99]'))
+    finally:
+        reset_request_trace(trace_token)
+
+    assert tool.call_count == 0
+    assert json.loads(result['messages'][0].content) == UNRESOLVED_EMAIL_RESULT
+    assert trace_data.mutating_tool_called is False
+    assert trace_data.tool_call_count == 0
+    assert trace_data.consultation_email_status == 'error'
+    assert trace_data.consultation_email_error_code == 'invalid_email'

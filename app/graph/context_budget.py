@@ -3,7 +3,8 @@
 `state['messages']` (и Redis-checkpoint под ним) продолжает копить всю
 историю сессии без ограничения — это остаётся ответственностью
 LangGraph-reducer'а (`add_messages`, см. `app/graph/state.py`) и не
-меняется здесь. Полная история также независимо сохраняется в PostgreSQL.
+меняется этим модулем. Исходная история независимо сохраняется в PostgreSQL,
+а новые пользовательские сообщения попадают в LangGraph уже обезличенными.
 Этот модуль отвечает только за то, что **уходит в конкретный вызов LLM**:
 последние `max_turns` реплик целиком плюс одна безопасная текстовая
 выжимка более старых.
@@ -12,26 +13,39 @@ LangGraph-reducer'а (`add_messages`, см. `app/graph/state.py`) и не
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from app.graph.policy import contains_pseudo_tool_call
+from app.privacy.pii import redact_pii_value
 
 UNSAFE_HISTORY_ANSWER = 'Предыдущий ответ не был сформирован.'
 """Нейтральная замена старого ответа со служебным псевдовызовом."""
 
 
 def _sanitize_message_for_model(message: BaseMessage) -> BaseMessage | None:
-    """Не даёт старому псевдовызову MCP повторно заразить контекст модели.
+    """Очищает PII и старый псевдовызов MCP перед отправкой модели.
 
     Такие AIMessage могли быть сохранены до включения фильтрации SSE. Их
     нельзя передавать обратно в LLM: локальные модели часто копируют этот
     синтаксис в новый ответ. Нативный tool-call при этом сохраняется, если
     провайдер прислал его вместе с текстом.
     """
-    if not isinstance(message, AIMessage) or not isinstance(message.content, str):
-        return message
-    if not contains_pseudo_tool_call(message.content):
-        return message
-    if message.tool_calls:
-        return message.model_copy(update={'content': UNSAFE_HISTORY_ANSWER})
-    return AIMessage(content=UNSAFE_HISTORY_ANSWER)
+    updates: dict = {}
+    redacted_content = redact_pii_value(message.content)
+    if redacted_content != message.content:
+        updates['content'] = redacted_content
+
+    redacted_additional_kwargs = redact_pii_value(message.additional_kwargs)
+    if redacted_additional_kwargs != message.additional_kwargs:
+        updates['additional_kwargs'] = redacted_additional_kwargs
+
+    if isinstance(message, AIMessage):
+        redacted_tool_calls = redact_pii_value(message.tool_calls)
+        if redacted_tool_calls != message.tool_calls:
+            updates['tool_calls'] = redacted_tool_calls
+
+        content = redacted_content
+        if isinstance(content, str) and contains_pseudo_tool_call(content):
+            updates['content'] = UNSAFE_HISTORY_ANSWER
+
+    return message.model_copy(update=updates) if updates else message
 
 
 def _sanitize_messages_for_model(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -85,8 +99,9 @@ def build_bounded_messages(
     Реплик не больше `max_turns` — передаются полностью, включая
     tool-сообщения. Более старые реплики схлопываются в одну
     `SystemMessage` с короткой выжимкой каждой ("Вопрос: ... Ответ: ...",
-    без сырых tool-результатов). `state['messages']` не изменяется — это
-    только представление для конкретного вызова LLM (см. docstring модуля).
+    без сырых tool-результатов). `state['messages']` дополнительно не
+    изменяется — это только представление для конкретного вызова LLM
+    (см. docstring модуля).
     """
     turns = _split_into_turns(messages)
     if len(turns) <= max_turns:

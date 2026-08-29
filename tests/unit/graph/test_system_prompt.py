@@ -11,6 +11,7 @@ from app.graph.prompts.system import (
     CONSULTATION_EMAIL_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT,
     FINAL_RESPONSE_SYSTEM_PROMPT_PARTS,
+    REDACTED_PERSONAL_DATA_PROMPT,
     SOURCES_PROMPT,
     STYLE_PROMPT,
     SYSTEM_PROMPT,
@@ -41,6 +42,18 @@ def test_prompts_keep_internal_configuration_confidential_and_reply_politely():
     assert 'не подтверждай и не опровергай догадки' in lowered
     assert 'вежливо и только следующим текстом' in lowered
     assert 'моя задача — помочь вам разобраться в вашем вопросе' in CONFIDENTIALITY_RESPONSE.lower()
+
+
+def test_prompts_treat_pii_placeholders_as_hidden_values():
+    lowered = REDACTED_PERSONAL_DATA_PROMPT.lower()
+
+    assert REDACTED_PERSONAL_DATA_PROMPT in SYSTEM_PROMPT_PARTS
+    assert REDACTED_PERSONAL_DATA_PROMPT in FINAL_RESPONSE_SYSTEM_PROMPT_PARTS
+    assert '[фио_1]' in lowered
+    assert '[email_1]' in lowered
+    assert 'не показывай сам маркер в обычном ответе' in lowered
+    assert 'маркер не означает, что значение отсутствует' in lowered
+    assert 'обращайся к пользователю на «вы»' in lowered
 
 
 def test_prompt_covers_two_audiences_including_workers_with_disabilities():
@@ -202,6 +215,9 @@ def test_consultation_email_prompt_requires_explicit_safe_request():
     assert 'не исправляй' in lowered
     assert 'не более одного вызова' in lowered
     assert 'не повторяй' in lowered
+    assert 'маркер вида [email_1]' in lowered
+    assert 'передавай маркер в поле email дословно' in lowered
+    assert 'не пытаясь восстановить исходный адрес' in lowered
 
 
 def test_consultation_email_prompt_delegates_formatting_and_uses_full_text():

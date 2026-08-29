@@ -1,6 +1,7 @@
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.graph.context_budget import build_bounded_messages
+from app.privacy.pii import pii_redaction_scope
 
 
 def _turn(question: str, answer: str) -> list:
@@ -100,3 +101,65 @@ def test_pseudo_tool_call_is_removed_from_old_turn_summary():
 
     assert 'call:default_api:' not in result[0].content
     assert 'Предыдущий ответ не был сформирован.' in result[0].content
+
+
+def test_personal_data_is_removed_from_all_message_fields_before_model_call():
+    email = 'ivan.petrov@example.com'
+    full_name = 'Иванов Иван Иванович'
+    messages = [
+        HumanMessage(content=f'Я {full_name}, отправьте ответ на {email}'),
+        AIMessage(
+            content='',
+            tool_calls=[
+                {
+                    'id': 'call_1',
+                    'name': 'send_consultation_email',
+                    'args': {'email': email},
+                }
+            ],
+        ),
+        ToolMessage(
+            content=f'{{"status":"ok","email":"{email}"}}',
+            tool_call_id='call_1',
+        ),
+    ]
+
+    with pii_redaction_scope():
+        result = build_bounded_messages(
+            messages,
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+    serialized = str(
+        [
+            {
+                'content': message.content,
+                'additional_kwargs': message.additional_kwargs,
+                'tool_calls': getattr(message, 'tool_calls', []),
+            }
+            for message in result
+        ]
+    )
+    assert full_name not in serialized
+    assert email not in serialized
+    assert '[ФИО_1]' in serialized
+    assert '[EMAIL_1]' in serialized
+
+
+def test_lowercase_name_from_legacy_history_is_redacted_before_model_call():
+    messages = [
+        HumanMessage(content='меня зовут алексей петров помогите с увольнением'),
+        AIMessage(content='Опишите обстоятельства увольнения.'),
+    ]
+
+    with pii_redaction_scope():
+        result = build_bounded_messages(
+            messages,
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+    assert result[0].content == (
+        'меня зовут [ФИО_1] помогите с увольнением'
+    )

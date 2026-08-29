@@ -1,3 +1,4 @@
+import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -171,6 +172,57 @@ async def test_request_id_routes_delivery_without_changing_session_history_key()
     assert graph.states[0]['session_id'] == 'conversation-1'
     assert graph.states[0]['messages'][0].id == 'request-1'
     assert graph.configs[0] == {'configurable': {'thread_id': 'conversation-1'}}
+
+
+async def test_consumer_sends_only_redacted_message_to_graph():
+    graph = _FakeGraph([[_token_event('Ответ')]])
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    full_name = 'Иванов Иван Иванович'
+    email = 'ivan.petrov@example.com'
+    message = _FakeMessage(
+        body=json.dumps(
+            {
+                'session_id': 'conversation-1',
+                'request_id': 'request-1',
+                'user_id': 'u1',
+                'message': f'Я {full_name}, ответьте на {email}',
+            },
+            ensure_ascii=False,
+        ).encode(),
+    )
+
+    await consumer._handle_message(message)
+
+    graph_message = graph.states[0]['messages'][0].content
+    assert full_name not in graph_message
+    assert email not in graph_message
+    assert graph_message == 'Я [ФИО_1], ответьте на [EMAIL_1]'
+
+
+async def test_consumer_redacts_lowercase_name_after_context_marker():
+    graph = _FakeGraph([[_token_event('Ответ')]])
+    sink = _TokenSinkRecorder()
+    consumer = _build_consumer(graph, sink)
+    message = _FakeMessage(
+        body=json.dumps(
+            {
+                'session_id': 'conversation-1',
+                'request_id': 'request-1',
+                'user_id': 'u1',
+                'message': (
+                    'меня зовут алексей петров помогите с увольнением'
+                ),
+            },
+            ensure_ascii=False,
+        ).encode(),
+    )
+
+    await consumer._handle_message(message)
+
+    assert graph.states[0]['messages'][0].content == (
+        'меня зовут [ФИО_1] помогите с увольнением'
+    )
 
 
 async def test_streams_only_final_node_tokens_and_ignores_internal_llm_output():

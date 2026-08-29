@@ -58,8 +58,8 @@ def create_analyze_intent_node(
     в `generate_direct`.
 
     Модели передаётся не вся `state['messages']`, а ограниченное по
-    бюджету представление (`context_settings`, VERA-020) — полная история
-    остаётся в Redis-checkpoint'е и в PostgreSQL без изменений.
+    бюджету и обезличенное представление (`context_settings`, VERA-020).
+    Исходный вопрос сохраняется в PostgreSQL, но не передаётся модели.
     """
     model_with_tools = chat_model.bind_tools(
         [kb_search_tool, consultation_email_tool]
