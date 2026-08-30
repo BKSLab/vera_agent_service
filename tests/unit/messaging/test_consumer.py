@@ -5,12 +5,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph
 
 from app.db.models.chat_turn import STATUS_PROCESSING
 from app.exceptions.llm import EmptyLlmStreamError
+from app.graph.state import AgentState
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import get_request_trace
+from app.privacy.pii import UnresolvedEmailError, resolve_email_for_tool
 from app.services.chat_persistence import (
     START_CLAIMED,
     ChatPersistenceService,
@@ -69,6 +73,44 @@ class _MutatingFailureGraph:
             trace_data.mutating_tool_called = True
             raise RuntimeError('LLM failed after email tool call')
             yield
+
+        return _generator()
+
+
+class _SessionPiiGraph:
+    """Минимально имитирует merge и checkpoint между репликами сессии."""
+
+    def __init__(
+        self,
+        checkpoint_values: dict | None = None,
+        resolve_on_call: dict[int, list[str]] | None = None,
+    ):
+        self.checkpoint_values = checkpoint_values or {}
+        self.resolve_on_call = resolve_on_call or {}
+        self.states: list[dict] = []
+        self.resolved: list[tuple[str, str | None]] = []
+
+    async def aget_state(self, config):
+        return SimpleNamespace(values=self.checkpoint_values)
+
+    def astream_events(self, state, config, version='v2'):
+        self.states.append(state)
+        call_number = len(self.states)
+        previous_messages = list(self.checkpoint_values.get('messages', []))
+        self.checkpoint_values = {
+            **self.checkpoint_values,
+            **state,
+            'messages': [*previous_messages, *state['messages']],
+        }
+
+        async def _generator():
+            for alias in self.resolve_on_call.get(call_number, []):
+                try:
+                    resolved = resolve_email_for_tool(alias)
+                except UnresolvedEmailError:
+                    resolved = None
+                self.resolved.append((alias, resolved))
+            yield _token_event(f'Ответ {call_number}')
 
         return _generator()
 
@@ -198,6 +240,222 @@ async def test_consumer_sends_only_redacted_message_to_graph():
     assert full_name not in graph_message
     assert email not in graph_message
     assert graph_message == 'Я [ФИО_1], ответьте на [EMAIL_1]'
+    assert graph.states[0]['pii_aliases'] == {
+        '[ФИО_1]': ['PERSON', full_name],
+        '[EMAIL_1]': ['EMAIL', email],
+    }
+
+
+async def test_email_alias_is_hydrated_and_resolved_in_next_turn():
+    email = 'first@example.com'
+    graph = _SessionPiiGraph(resolve_on_call={2: ['[EMAIL_1]']})
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+
+    first_payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message=f'Отправьте консультацию на {email}',
+    )
+    second_payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-2',
+        user_id='user-1',
+        message='Да, отправьте',
+    )
+
+    first_answer = ''.join(
+        [
+            chunk
+            async for chunk in consumer._stream_answer(
+                first_payload,
+                TurnPersistenceData(),
+            )
+        ]
+    )
+    second_answer = ''.join(
+        [
+            chunk
+            async for chunk in consumer._stream_answer(
+                second_payload,
+                TurnPersistenceData(),
+            )
+        ]
+    )
+
+    assert first_answer == 'Ответ 1'
+    assert second_answer == 'Ответ 2'
+    assert graph.states[0]['messages'][0].content.endswith('[EMAIL_1]')
+    assert graph.states[1]['messages'][0].content == 'Да, отправьте'
+    assert graph.states[1]['pii_aliases'] == {
+        '[EMAIL_1]': ['EMAIL', email]
+    }
+    assert graph.resolved == [('[EMAIL_1]', email)]
+    assert email not in str(
+        [message.content for message in graph.checkpoint_values['messages']]
+    )
+
+
+async def test_different_emails_keep_distinct_aliases_across_turns():
+    first_email = 'first@example.com'
+    second_email = 'second@example.com'
+    graph = _SessionPiiGraph(
+        resolve_on_call={2: ['[EMAIL_1]', '[EMAIL_2]']}
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+
+    for request_id, email in (
+        ('request-1', first_email),
+        ('request-2', second_email),
+    ):
+        payload = AgentRequestMessage(
+            session_id='session-1',
+            request_id=request_id,
+            user_id='user-1',
+            message=f'Отправьте на {email}',
+        )
+        _ = [
+            chunk
+            async for chunk in consumer._stream_answer(
+                payload,
+                TurnPersistenceData(),
+            )
+        ]
+
+    assert graph.states[0]['messages'][0].content == 'Отправьте на [EMAIL_1]'
+    assert graph.states[1]['messages'][0].content == 'Отправьте на [EMAIL_2]'
+    assert graph.resolved == [
+        ('[EMAIL_1]', first_email),
+        ('[EMAIL_2]', second_email),
+    ]
+
+
+async def test_legacy_alias_without_mapping_is_reserved_and_never_rebound():
+    new_email = 'new@example.com'
+    graph = _SessionPiiGraph(
+        checkpoint_values={
+            'session_id': 'session-1',
+            'messages': [HumanMessage(content='Старая почта [EMAIL_1]')],
+        },
+        resolve_on_call={1: ['[EMAIL_1]', '[EMAIL_2]']},
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-2',
+        user_id='user-1',
+        message=f'Используйте новую почту {new_email}',
+    )
+
+    _ = [
+        chunk
+        async for chunk in consumer._stream_answer(
+            payload,
+            TurnPersistenceData(),
+        )
+    ]
+
+    assert graph.states[0]['messages'][0].content == (
+        'Используйте новую почту [EMAIL_2]'
+    )
+    assert graph.states[0]['pii_aliases'] == {
+        '[EMAIL_2]': ['EMAIL', new_email]
+    }
+    assert graph.resolved == [
+        ('[EMAIL_1]', None),
+        ('[EMAIL_2]', new_email),
+    ]
+
+
+async def test_raw_legacy_email_is_registered_before_new_turn():
+    legacy_email = 'legacy@example.com'
+    graph = _SessionPiiGraph(
+        checkpoint_values={
+            'session_id': 'session-1',
+            'messages': [
+                HumanMessage(content=f'Отправьте на {legacy_email}')
+            ],
+        },
+        resolve_on_call={1: ['[EMAIL_1]']},
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-2',
+        user_id='user-1',
+        message='Да, отправьте',
+    )
+
+    _ = [
+        chunk
+        async for chunk in consumer._stream_answer(
+            payload,
+            TurnPersistenceData(),
+        )
+    ]
+
+    assert graph.states[0]['pii_aliases'] == {
+        '[EMAIL_1]': ['EMAIL', legacy_email]
+    }
+    assert graph.resolved == [('[EMAIL_1]', legacy_email)]
+
+
+async def test_real_checkpointer_restores_email_alias_for_next_turn():
+    email = 'checkpoint@example.com'
+    resolved: list[str] = []
+
+    def generate_direct(state: AgentState) -> dict:
+        if state['messages'][-1].content == 'Да, отправьте':
+            resolved.append(resolve_email_for_tool('[EMAIL_1]'))
+        return {'messages': [AIMessage(content='Готово')]}
+
+    builder = StateGraph(AgentState)
+    builder.add_node('generate_direct', generate_direct)
+    builder.set_entry_point('generate_direct')
+    builder.set_finish_point('generate_direct')
+    graph = builder.compile(checkpointer=InMemorySaver())
+    consumer = AgentRequestConsumer(
+        connection_url='amqp://unused',
+        queue_name='agent.requests',
+        dlq_name='agent.requests.dlq',
+        graph=graph,
+        token_sink=_TokenSinkRecorder(),
+    )
+
+    for request_id, message in (
+        ('request-1', f'Отправьте на {email}'),
+        ('request-2', 'Да, отправьте'),
+    ):
+        payload = AgentRequestMessage(
+            session_id='session-with-checkpoint',
+            request_id=request_id,
+            user_id='user-1',
+            message=message,
+        )
+        answer = ''.join(
+            [
+                chunk
+                async for chunk in consumer._stream_answer(
+                    payload,
+                    TurnPersistenceData(),
+                )
+            ]
+        )
+        assert answer == 'Готово'
+
+    snapshot = await graph.aget_state(
+        {'configurable': {'thread_id': 'session-with-checkpoint'}}
+    )
+    assert resolved == [email]
+    assert snapshot.values['pii_aliases'] == {
+        '[EMAIL_1]': ['EMAIL', email]
+    }
+    human_contents = [
+        message.content
+        for message in snapshot.values['messages']
+        if isinstance(message, HumanMessage)
+    ]
+    assert human_contents == ['Отправьте на [EMAIL_1]', 'Да, отправьте']
 
 
 async def test_consumer_redacts_lowercase_name_after_context_marker():

@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
@@ -10,8 +11,16 @@ from app.core.settings import McpSettings
 from app.exceptions.mcp import McpUnavailableError
 from app.graph.state import AgentState
 from app.observability.request_trace import get_request_trace
-from app.privacy.pii import UnresolvedEmailError, resolve_email_for_tool
+from app.privacy.pii import (
+    UnresolvedEmailError,
+    neutralize_pii_placeholders,
+    resolve_email_for_tool,
+)
 from app.schemas.mcp_tool_results import ConsultationEmailToolResult
+
+logger = logging.getLogger('vera_agent_service')
+
+_CONSULTATION_DOCUMENT_FIELDS = ('consultation_text', 'consultation_topic')
 
 UNCONFIRMED_DELIVERY_RESULT = {
     'status': 'error',
@@ -42,6 +51,41 @@ UNRESOLVED_EMAIL_RESULT = {
 }
 
 
+def _neutralize_document_placeholders(arguments: dict) -> None:
+    field_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
+
+    for field_name in _CONSULTATION_DOCUMENT_FIELDS:
+        value = arguments.get(field_name)
+        if not isinstance(value, str):
+            continue
+        neutralized, counts = neutralize_pii_placeholders(value)
+        if not counts:
+            continue
+        arguments[field_name] = neutralized
+        field_counts[field_name] = sum(counts.values())
+        for label, count in counts.items():
+            type_counts[label] = type_counts.get(label, 0) + count
+
+    if not field_counts:
+        return
+
+    fields_summary = ', '.join(
+        f'{field_name}={count}'
+        for field_name, count in sorted(field_counts.items())
+    )
+    types_summary = ', '.join(
+        f'{label}={count}' for label, count in sorted(type_counts.items())
+    )
+    logger.warning(
+        '🛡️ Нейтрализованы маркеры ПДн перед отправкой консультации: '
+        'поля: %s; заменено=%d; типы: %s.',
+        fields_summary,
+        sum(field_counts.values()),
+        types_summary,
+    )
+
+
 def create_call_consultation_email_node(
     consultation_email_tool: BaseTool,
     mcp_settings: McpSettings,
@@ -54,6 +98,7 @@ def create_call_consultation_email_node(
         try:
             arguments = dict(tool_call['args'])
             arguments['email'] = resolve_email_for_tool(arguments.get('email'))
+            _neutralize_document_placeholders(arguments)
         except UnresolvedEmailError:
             result = dict(UNRESOLVED_EMAIL_RESULT)
         else:

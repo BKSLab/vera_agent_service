@@ -1,7 +1,12 @@
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.graph.context_budget import build_bounded_messages
-from app.privacy.pii import pii_redaction_scope
+from app.privacy.pii import (
+    UnresolvedEmailError,
+    pii_redaction_scope,
+    resolve_email_for_tool,
+)
 
 
 def _turn(question: str, answer: str) -> list:
@@ -145,6 +150,117 @@ def test_personal_data_is_removed_from_all_message_fields_before_model_call():
     assert email not in serialized
     assert '[ФИО_1]' in serialized
     assert '[EMAIL_1]' in serialized
+
+
+def test_ai_and_tool_emails_are_redacted_but_not_authorized():
+    ai_email = 'answer@example.com'
+    tool_email = 'reference@example.com'
+    messages = [
+        HumanMessage(content='Куда обратиться?'),
+        AIMessage(
+            content=f'Возможно, по адресу {ai_email}',
+            tool_calls=[
+                {
+                    'id': 'call_1',
+                    'name': 'vera_rag_kb',
+                    'args': {'query': 'адрес для обращений'},
+                }
+            ],
+        ),
+        ToolMessage(
+            content=f'Обращения принимаются по адресу {tool_email}',
+            tool_call_id='call_1',
+        ),
+    ]
+
+    with pii_redaction_scope() as context:
+        result = build_bounded_messages(
+            messages,
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+        serialized = str(result)
+        assert ai_email not in serialized
+        assert tool_email not in serialized
+        assert '[EMAIL_1]' in serialized
+        assert '[EMAIL_2]' in serialized
+        assert context.export() == {}
+        for value in ('[EMAIL_1]', '[EMAIL_2]', ai_email, tool_email):
+            with pytest.raises(UnresolvedEmailError):
+                resolve_email_for_tool(value)
+
+
+def test_only_human_email_is_exported_and_resolvable():
+    user_email = 'user@example.com'
+    tool_email = 'office@example.com'
+    messages = [
+        HumanMessage(content=f'Отправьте на {user_email}'),
+        AIMessage(
+            content='',
+            tool_calls=[
+                {
+                    'id': 'call_1',
+                    'name': 'vera_rag_kb',
+                    'args': {'query': 'контакты'},
+                }
+            ],
+        ),
+        ToolMessage(
+            content=f'Справочный адрес: {tool_email}',
+            tool_call_id='call_1',
+        ),
+    ]
+
+    with pii_redaction_scope() as context:
+        result = build_bounded_messages(
+            messages,
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+        assert result[0].content == 'Отправьте на [EMAIL_1]'
+        assert result[2].content == 'Справочный адрес: [EMAIL_2]'
+        assert context.export() == {
+            '[EMAIL_1]': ['EMAIL', user_email]
+        }
+        assert resolve_email_for_tool('[EMAIL_1]') == user_email
+        assert resolve_email_for_tool(user_email) == user_email
+        for value in ('[EMAIL_2]', tool_email):
+            with pytest.raises(UnresolvedEmailError):
+                resolve_email_for_tool(value)
+
+
+def test_old_turn_summary_preserves_email_source_trust():
+    user_email = 'user@example.com'
+    ai_email = 'invented@example.com'
+    messages = [
+        HumanMessage(content=f'Моя почта {user_email}'),
+        AIMessage(content=f'Справочный адрес {ai_email}'),
+        HumanMessage(content='Продолжим'),
+        AIMessage(content='Да.'),
+    ]
+
+    with pii_redaction_scope() as context:
+        result = build_bounded_messages(
+            messages,
+            max_turns=1,
+            older_turns_summary_max_chars=200,
+        )
+
+        assert isinstance(result[0], SystemMessage)
+        assert user_email not in result[0].content
+        assert ai_email not in result[0].content
+        assert '[EMAIL_1]' in result[0].content
+        assert '[EMAIL_2]' in result[0].content
+        assert context.export() == {
+            '[EMAIL_1]': ['EMAIL', user_email]
+        }
+        assert resolve_email_for_tool('[EMAIL_1]') == user_email
+        with pytest.raises(UnresolvedEmailError):
+            resolve_email_for_tool('[EMAIL_2]')
+        with pytest.raises(UnresolvedEmailError):
+            resolve_email_for_tool(ai_email)
 
 
 def test_lowercase_name_from_legacy_history_is_redacted_before_model_call():

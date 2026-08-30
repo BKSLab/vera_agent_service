@@ -1,4 +1,4 @@
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -22,6 +22,13 @@ class AgentState(TypedDict):
     по `session_id` (Этап 5), а не затирает её. Это единственный механизм,
     которым в графе реально работает решение "убрать `history` из payload
     RabbitMQ" (AGENT_SERVICE_PLAN.md, раздел 0.1, раздел 3.1)."""
+
+    pii_aliases: NotRequired[dict[str, list[str]]]
+    """Сессионное соответствие обезличенных маркеров реальным значениям.
+    В поле попадают только значения из пользовательских сообщений. Оно
+    сохраняется Redis-checkpointer'ом, но не включается в сообщения,
+    передаваемые LLM. Consumer восстанавливает mapping до редактирования новой
+    реплики, чтобы один alias не получил разные значения между репликами."""
 
     retrieved_chunks: list[dict]
     """Чанки, полученные от `vera_rag_kb` (Этап 4). Пустой список — либо тул

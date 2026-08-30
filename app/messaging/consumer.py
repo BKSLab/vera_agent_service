@@ -2,14 +2,14 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from os import getpid
 from socket import gethostname
 
 import aio_pika
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 from openinference.semconv.trace import OpenInferenceSpanKindValues, SpanAttributes
 from opentelemetry.trace import Span, Status, StatusCode
@@ -36,7 +36,12 @@ from app.observability.request_trace import (
     set_request_trace,
 )
 from app.observability.tracing import get_tracer
-from app.privacy.pii import pii_redaction_scope, redact_pii_text
+from app.privacy.pii import (
+    PiiRedactionContext,
+    pii_redaction_scope,
+    redact_pii_text,
+    redact_pii_value,
+)
 from app.services.chat_persistence import (
     START_DUPLICATE_IN_PROGRESS,
     START_DUPLICATE_TERMINAL,
@@ -172,16 +177,29 @@ def _get_backoff_delay(attempt: int) -> float:
     return base_delay + jitter
 
 
-def _initial_state(payload: AgentRequestMessage) -> dict:
+def _initial_state(
+    payload: AgentRequestMessage,
+    pii_context: PiiRedactionContext | None = None,
+) -> dict:
+    if pii_context is None:
+        with pii_redaction_scope() as standalone_context:
+            return _initial_state(payload, standalone_context)
+
+    redacted_message = redact_pii_text(
+        payload.message,
+        pii_context,
+        trusted=True,
+    )
     return {
         'session_id': payload.session_id,
         'user_id': payload.user_id,
         'messages': [
             HumanMessage(
-                content=redact_pii_text(payload.message),
+                content=redacted_message,
                 id=payload.request_id,
             )
         ],
+        'pii_aliases': pii_context.export(),
         'retrieved_chunks': [],
         'tool_calls': [],
         'search_unavailable': False,
@@ -418,9 +436,15 @@ class AgentRequestConsumer:
 
         # PostgreSQL сохраняет исходный вопрос согласно продуктовому контракту,
         # но в LangGraph/LLM попадает только обезличенная копия. Соответствия
-        # маркеров существуют лишь до завершения текущей обработки.
-        with pii_redaction_scope():
-            await self._process_claimed_turn(delivery, payload, span, trace_data)
+        # маркеров восстанавливаются из Redis-checkpoint внутри обработки.
+        with pii_redaction_scope() as pii_context:
+            await self._process_claimed_turn(
+                delivery,
+                payload,
+                span,
+                trace_data,
+                pii_context,
+            )
 
     async def _replay_terminal_outcome(
         self,
@@ -473,6 +497,7 @@ class AgentRequestConsumer:
         payload: AgentRequestMessage,
         span: Span,
         trace_data: AgentRequestTraceData,
+        pii_context: PiiRedactionContext,
     ) -> None:
         """Выполняет граф и приводит delivery к ровно одному исходу."""
         last_error: Exception | None = None
@@ -485,7 +510,11 @@ class AgentRequestConsumer:
             trace_data.response_chunk_count = 0
             trace_data.response_char_count = 0
             try:
-                async for content in self._stream_answer(payload, persistence_data):
+                async for content in self._stream_answer(
+                    payload,
+                    persistence_data,
+                    pii_context,
+                ):
                     await self._token_sink(payload.request_id, {'type': 'token', 'content': content})
                     streaming_started = True
                     trace_data.streaming_started = True
@@ -863,12 +892,38 @@ class AgentRequestConsumer:
         self,
         payload: AgentRequestMessage,
         persistence_data: TurnPersistenceData,
+        pii_context: PiiRedactionContext | None = None,
     ) -> AsyncIterator[str]:
+        if pii_context is None:
+            with pii_redaction_scope() as standalone_context:
+                async for content in self._stream_answer(
+                    payload,
+                    persistence_data,
+                    standalone_context,
+                ):
+                    yield content
+            return
+
         config = {'configurable': {'thread_id': payload.session_id}}
+        checkpoint_values = await self._load_checkpoint_values(config)
+        pii_context.hydrate(checkpoint_values.get('pii_aliases'))
+        self._reserve_history_aliases(
+            pii_context,
+            checkpoint_values.get('messages'),
+        )
+        if 'pii_aliases' not in checkpoint_values:
+            self._register_legacy_history_pii(
+                checkpoint_values.get('messages'),
+            )
+        initial_state = _initial_state(payload, pii_context)
         streamed_content = False
         deferred_answer: str | None = None
         blocked_pseudo_output = False
-        async for event in self._graph.astream_events(_initial_state(payload), config=config, version='v2'):
+        async for event in self._graph.astream_events(
+            initial_state,
+            config=config,
+            version='v2',
+        ):
             # Node-level outputs повторяют `tool_calls`/`retrieved_chunks`.
             # Единственный authoritative snapshot — корневой graph output.
             event_is_chain_end = event.get('event') == 'on_chain_end'
@@ -938,6 +993,50 @@ class AgentRequestConsumer:
             # snapshot, клиент не должен получить пустую реплику после
             # фильтрации служебного текста.
             yield UNSAFE_TOOL_CALL_RESPONSE
+
+    async def _load_checkpoint_values(self, config: dict) -> Mapping:
+        """Читает состояние сессии; тестовый граф может быть без checkpointer."""
+
+        get_state = getattr(self._graph, 'aget_state', None)
+        if get_state is None:
+            return {}
+        try:
+            snapshot = await get_state(config)
+        except ValueError as error:
+            if 'checkpointer' in str(error).casefold():
+                return {}
+            raise
+        values = getattr(snapshot, 'values', None)
+        return values if isinstance(values, Mapping) else {}
+
+    @staticmethod
+    def _reserve_history_aliases(
+        pii_context: PiiRedactionContext,
+        messages: object,
+    ) -> None:
+        if not isinstance(messages, (list, tuple)):
+            return
+        for message in messages:
+            if not isinstance(message, BaseMessage):
+                continue
+            pii_context.reserve_aliases(message.content)
+            pii_context.reserve_aliases(message.additional_kwargs)
+            if isinstance(message, AIMessage):
+                pii_context.reserve_aliases(message.tool_calls)
+
+    @staticmethod
+    def _register_legacy_history_pii(messages: object) -> None:
+        """Один раз наполняет mapping из истории старого формата."""
+
+        if not isinstance(messages, (list, tuple)):
+            return
+        for message in messages:
+            # Только пользовательская реплика является источником разрешённых
+            # значений. Email из старого AI/tool output нельзя авторизовать.
+            if not isinstance(message, HumanMessage):
+                continue
+            redact_pii_value(message.content, trusted=True)
+            redact_pii_value(message.additional_kwargs, trusted=True)
 
 
 def _parse_payload(body: bytes) -> AgentRequestMessage:

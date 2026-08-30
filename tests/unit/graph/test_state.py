@@ -14,6 +14,7 @@ def test_agent_state_has_expected_keys():
         'session_id',
         'user_id',
         'messages',
+        'pii_aliases',
         'retrieved_chunks',
         'tool_calls',
         'search_unavailable',
@@ -40,6 +41,7 @@ async def test_messages_accumulate_via_add_messages_reducer():
             'session_id': 'test-session',
             'user_id': None,
             'messages': [HumanMessage(content='Привет')],
+            'pii_aliases': {'[EMAIL_1]': ['EMAIL', 'first@example.com']},
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
@@ -51,6 +53,7 @@ async def test_messages_accumulate_via_add_messages_reducer():
             'session_id': 'test-session',
             'user_id': None,
             'messages': [HumanMessage(content='Второй вопрос')],
+            'pii_aliases': {'[EMAIL_1]': ['EMAIL', 'first@example.com']},
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
@@ -60,6 +63,9 @@ async def test_messages_accumulate_via_add_messages_reducer():
 
     contents = [message.content for message in result['messages']]
     assert contents == ['Привет', 'Второй вопрос']
+    assert result['pii_aliases'] == {
+        '[EMAIL_1]': ['EMAIL', 'first@example.com']
+    }
 
 
 async def test_messages_do_not_leak_between_sessions():
@@ -75,6 +81,7 @@ async def test_messages_do_not_leak_between_sessions():
             'session_id': 'session-a',
             'user_id': None,
             'messages': [HumanMessage(content='Вопрос в сессии A')],
+            'pii_aliases': {'[EMAIL_1]': ['EMAIL', 'a@example.com']},
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
@@ -86,6 +93,7 @@ async def test_messages_do_not_leak_between_sessions():
             'session_id': 'session-b',
             'user_id': None,
             'messages': [HumanMessage(content='Вопрос в сессии B')],
+            'pii_aliases': {},
             'retrieved_chunks': [],
             'tool_calls': [],
             'search_unavailable': False,
@@ -95,3 +103,4 @@ async def test_messages_do_not_leak_between_sessions():
 
     contents = [message.content for message in result_b['messages']]
     assert contents == ['Вопрос в сессии B']
+    assert result_b['pii_aliases'] == {}

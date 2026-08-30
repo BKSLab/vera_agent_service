@@ -28,11 +28,15 @@ def _sanitize_message_for_model(message: BaseMessage) -> BaseMessage | None:
     провайдер прислал его вместе с текстом.
     """
     updates: dict = {}
-    redacted_content = redact_pii_value(message.content)
+    trusted = isinstance(message, HumanMessage)
+    redacted_content = redact_pii_value(message.content, trusted=trusted)
     if redacted_content != message.content:
         updates['content'] = redacted_content
 
-    redacted_additional_kwargs = redact_pii_value(message.additional_kwargs)
+    redacted_additional_kwargs = redact_pii_value(
+        message.additional_kwargs,
+        trusted=trusted,
+    )
     if redacted_additional_kwargs != message.additional_kwargs:
         updates['additional_kwargs'] = redacted_additional_kwargs
 
@@ -83,6 +87,11 @@ def _summarize_turn(turn: list[BaseMessage], max_chars: int) -> str:
     answer = final_ai.content if final_ai and isinstance(final_ai.content, str) else ''
     if contains_pseudo_tool_call(answer):
         answer = UNSAFE_HISTORY_ANSWER
+    # Выжимка станет SystemMessage, поэтому очищаем её части до склейки, пока
+    # известен источник: email вопроса остаётся пользовательским, а email из
+    # ответа модели только маскируется и не разрешается для отправки.
+    question = redact_pii_value(question, trusted=True)
+    answer = redact_pii_value(answer)
     summary = f'Вопрос: {question.strip()}\nОтвет: {answer.strip()}'.strip()
     if max_chars > 0 and len(summary) > max_chars:
         summary = summary[:max_chars].rstrip() + '…'

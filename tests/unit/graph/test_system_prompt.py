@@ -52,8 +52,11 @@ def test_prompts_treat_pii_placeholders_as_hidden_values():
     assert '[фио_1]' in lowered
     assert '[email_1]' in lowered
     assert 'не показывай сам маркер в обычном ответе' in lowered
+    assert 'тексте консультации или её теме' in lowered
     assert 'маркер не означает, что значение отсутствует' in lowered
     assert 'обращайся к пользователю на «вы»' in lowered
+    assert 'единственное допустимое исключение' in lowered
+    assert 'в поле email' in lowered
 
 
 def test_prompt_covers_two_audiences_including_workers_with_disabilities():
@@ -216,8 +219,14 @@ def test_consultation_email_prompt_requires_explicit_safe_request():
     assert 'не более одного вызова' in lowered
     assert 'не повторяй' in lowered
     assert 'маркер вида [email_1]' in lowered
-    assert 'передавай маркер в поле email дословно' in lowered
+    assert 'только когда он находится в сообщении пользователя' in lowered
+    assert 'не разрешает отправку' in lowered
+    assert 'пользовательский маркер передавай в поле email дословно' in lowered
     assert 'не пытаясь восстановить исходный адрес' in lowered
+    assert 'поле email — единственное поле инструмента' in lowered
+    assert 'в consultation_text и consultation_topic не передавай никаких маркеров' in lowered
+    assert 'перестраивай фразы естественно' in lowered
+    assert 'опускай именное приветствие' in lowered
 
 
 def test_consultation_email_prompt_delegates_formatting_and_uses_full_text():

@@ -3,7 +3,9 @@ import logging
 import pytest
 
 from app.privacy.pii import (
+    PiiRedactionContext,
     UnresolvedEmailError,
+    neutralize_pii_placeholders,
     pii_redaction_scope,
     redact_pii_text,
     redact_pii_value,
@@ -50,8 +52,11 @@ def test_email_alias_is_stable_and_resolves_only_inside_request_scope():
     email = 'User.Name@example.com'
 
     with pii_redaction_scope():
-        first = redact_pii_text(f'Отправьте на {email}')
-        second = redact_pii_text(f'Адрес ещё раз: {email.lower()}')
+        first = redact_pii_text(f'Отправьте на {email}', trusted=True)
+        second = redact_pii_text(
+            f'Адрес ещё раз: {email.lower()}',
+            trusted=True,
+        )
 
         assert first.endswith('[EMAIL_1]')
         assert second.endswith('[EMAIL_1]')
@@ -59,10 +64,51 @@ def test_email_alias_is_stable_and_resolves_only_inside_request_scope():
         assert resolve_email_for_tool(email.lower()) == email
 
 
-def test_unknown_email_alias_is_rejected_inside_request_scope():
+def test_untrusted_email_is_redacted_but_not_resolvable_or_exported():
+    email = 'reference@example.com'
+
+    with pii_redaction_scope() as context:
+        redacted = redact_pii_text(f'Справочный адрес: {email}')
+
+        assert redacted == 'Справочный адрес: [EMAIL_1]'
+        assert context.export() == {}
+        with pytest.raises(UnresolvedEmailError):
+            resolve_email_for_tool('[EMAIL_1]')
+        with pytest.raises(UnresolvedEmailError):
+            resolve_email_for_tool(email)
+
+
+def test_user_input_upgrades_existing_untrusted_email_alias():
+    untrusted_email = 'INFO@example.com'
+    user_email = 'info@example.com'
+
+    with pii_redaction_scope() as context:
+        from_reference = redact_pii_text(f'Справка: {untrusted_email}')
+        from_user = redact_pii_text(
+            f'Моя почта: {user_email}',
+            trusted=True,
+        )
+
+        assert from_reference == 'Справка: [EMAIL_1]'
+        assert from_user == 'Моя почта: [EMAIL_1]'
+        assert context.export() == {
+            '[EMAIL_1]': ['EMAIL', user_email]
+        }
+        assert resolve_email_for_tool('[EMAIL_1]') == user_email
+        assert resolve_email_for_tool(untrusted_email) == user_email
+
+
+@pytest.mark.parametrize('value', ['[EMAIL_99]', 'unknown@example.com'])
+def test_unknown_email_value_is_rejected_inside_request_scope(value):
     with pii_redaction_scope():
         with pytest.raises(UnresolvedEmailError):
-            resolve_email_for_tool('[EMAIL_99]')
+            resolve_email_for_tool(value)
+
+
+@pytest.mark.parametrize('value', ['user@example.com', '[EMAIL_1]'])
+def test_email_resolution_without_scope_is_fail_closed(value):
+    with pytest.raises(UnresolvedEmailError, match='Контекст обезличивания'):
+        resolve_email_for_tool(value)
 
 
 @pytest.mark.parametrize('value', [None, '', '   ', 123])
@@ -83,6 +129,54 @@ def test_recursive_redaction_handles_tuples_and_preserves_non_text_values():
         None,
         {'name': 'Меня зовут [ФИО_1]'},
     )
+
+
+@pytest.mark.parametrize(
+    ('placeholder', 'neutral_text', 'label'),
+    [
+        ('[EMAIL_99]', 'указанный адрес электронной почты', 'EMAIL'),
+        ('[ФИО_99]', 'указанное вами лицо', 'ФИО'),
+        ('[ТЕЛЕФОН_99]', 'указанный номер телефона', 'ТЕЛЕФОН'),
+        ('[СНИЛС_99]', 'указанные данные СНИЛС', 'СНИЛС'),
+        ('[ПАСПОРТ_99]', 'указанные паспортные данные', 'ПАСПОРТ'),
+    ],
+)
+def test_neutralizes_each_supported_placeholder_type(
+    placeholder,
+    neutral_text,
+    label,
+):
+    neutralized, counts = neutralize_pii_placeholders(
+        f'До {placeholder} после'
+    )
+
+    assert neutralized == f'До {neutral_text} после'
+    assert counts == {label: 1}
+
+
+def test_neutralizes_multiple_and_repeated_placeholders():
+    neutralized, counts = neutralize_pii_placeholders(
+        '[ФИО_1], [ФИО_99], [ТЕЛЕФОН_2] и снова [ТЕЛЕФОН_2]'
+    )
+
+    assert neutralized == (
+        'указанное вами лицо, указанное вами лицо, '
+        'указанный номер телефона и снова указанный номер телефона'
+    )
+    assert counts == {'ФИО': 2, 'ТЕЛЕФОН': 2}
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        'ч. 1 ст. 81 ТК РФ',
+        'См. [Приложение 1] к договору.',
+        'Служебное обозначение [СТАТЬЯ_1] не является PII-маркером.',
+        'Обычный текст без маркеров.',
+    ],
+)
+def test_placeholder_neutralization_preserves_unrelated_text(text):
+    assert neutralize_pii_placeholders(text) == (text, {})
 
 
 def test_vera_name_is_not_redacted():
@@ -274,6 +368,178 @@ def test_person_aliases_are_isolated_between_request_scopes():
     assert first_scope_first.endswith('[ФИО_1]')
     assert first_scope_second.endswith('[ФИО_2]')
     assert second_scope_first.endswith('[ФИО_1]')
+
+
+def test_context_export_and_hydrate_preserve_aliases_and_counters():
+    first_context = PiiRedactionContext()
+    first_email = redact_pii_text(
+        'Почта first@example.com',
+        first_context,
+        trusted=True,
+    )
+    first_person = redact_pii_text(
+        'Меня зовут Алексей',
+        first_context,
+        trusted=True,
+    )
+
+    second_context = PiiRedactionContext()
+    second_context.hydrate(first_context.export())
+    repeated_email = redact_pii_text(
+        'Снова FIRST@example.com',
+        second_context,
+        trusted=True,
+    )
+    next_email = redact_pii_text(
+        'Теперь second@example.com',
+        second_context,
+        trusted=True,
+    )
+    repeated_person = redact_pii_text(
+        'Моё имя Алексей',
+        second_context,
+        trusted=True,
+    )
+
+    assert first_email == 'Почта [EMAIL_1]'
+    assert repeated_email == 'Снова [EMAIL_1]'
+    assert next_email == 'Теперь [EMAIL_2]'
+    assert first_person == 'Меня зовут [ФИО_1]'
+    assert repeated_person == 'Моё имя [ФИО_1]'
+    assert second_context.resolve_email('[EMAIL_1]') == 'first@example.com'
+    assert second_context.resolve_email('[EMAIL_2]') == 'second@example.com'
+
+
+def test_reserved_legacy_alias_is_not_reused_without_stored_value():
+    context = PiiRedactionContext()
+    context.reserve_aliases(
+        {
+            'content': 'Старые [EMAIL_1], [EMAIL_3] и [ФИО_7]',
+            'tool_calls': [{'args': {'email': '[EMAIL_2]'}}],
+        }
+    )
+
+    redacted_email = redact_pii_text(
+        'new@example.com',
+        context,
+        trusted=True,
+    )
+    redacted_person = redact_pii_text(
+        'Меня зовут Анна',
+        context,
+        trusted=True,
+    )
+
+    assert redacted_email == '[EMAIL_4]'
+    assert redacted_person == 'Меня зовут [ФИО_8]'
+    with pytest.raises(UnresolvedEmailError):
+        context.resolve_email('[EMAIL_1]')
+    assert context.resolve_email('[EMAIL_4]') == 'new@example.com'
+
+
+def test_hydrate_ignores_invalid_or_mismatched_email_records_but_reserves_index():
+    context = PiiRedactionContext()
+    context.hydrate(
+        {
+            '[EMAIL_4]': ('PERSON', 'attacker@example.com'),
+            '[EMAIL_5]': ('EMAIL', 'not-an-email'),
+            '[EMAIL_6]': ['EMAIL', 'valid@example.com'],
+            '[UNKNOWN_99]': ('EMAIL', 'other@example.com'),
+        }
+    )
+
+    assert redact_pii_text('next@example.com', context) == '[EMAIL_7]'
+    assert context.resolve_email('[EMAIL_6]') == 'valid@example.com'
+    with pytest.raises(UnresolvedEmailError):
+        context.resolve_email('[EMAIL_4]')
+    with pytest.raises(UnresolvedEmailError):
+        context.resolve_email('[EMAIL_5]')
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        'закон Яровой',
+        'Закон Яровой',
+        'явка обязательна',
+        'Явка обязательна',
+        'ясли для ребёнка',
+        'Ясли для ребёнка',
+        'ярмарка вакансий',
+        'якорь договора',
+        'Яндекс открыл вакансию',
+        'язык трудового договора',
+        'Ярославский районный суд',
+    ],
+)
+def test_letter_ya_inside_word_does_not_start_person_marker(text):
+    with pii_redaction_scope():
+        assert redact_pii_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        ('я Алексей', 'я [ФИО_1]'),
+        ('Я — Алексей', 'Я — [ФИО_1]'),
+        ('я, кстати, Кирилл', 'я, кстати, [ФИО_1]'),
+    ],
+)
+def test_standalone_ya_still_starts_person_marker(text, expected):
+    with pii_redaction_scope():
+        assert redact_pii_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '79991234567',
+        '+79991234567',
+        '8 (999) 123-45-67',
+        '7 999 123 45 67',
+        '7(999)1234567',
+        'телефон 9991234567',
+        'телефон: (999) 123-45-67',
+        'номер телефона — 999 123-45-67',
+        'мобильный номер 9991234567',
+        'контактный номер: 9991234567',
+        'тел. 999-123-45-67',
+        'звоните 9991234567',
+        'позвоните мне по номеру 999 123 45 67',
+        'WhatsApp: 9991234567',
+        'ватсап 9991234567',
+        'Телефон +79991234567. В 2024 году адрес изменился.',
+        'телефон 9991234567, добавочный 42',
+    ],
+)
+def test_redacts_supported_phone_formats(text):
+    with pii_redaction_scope():
+        redacted = redact_pii_text(text)
+
+    assert '[ТЕЛЕФОН_1]' in redacted
+    assert sum(character.isdigit() for character in redacted) < 10
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '9991234567',
+        'ИНН 9991234567',
+        'номер дела 9991234567',
+        'заказ № 9991234567',
+        '4276 3800 1234 5678',
+        '7999 1234 5678 9012',
+        '40702810900000000001',
+        '799912345678',
+        '+7999123456',
+        '899912345678',
+        'телефон 8 999 123 45 67 89',
+        'мой номер 9991234567',
+    ],
+)
+def test_phone_rules_do_not_mask_ambiguous_or_wrong_length_numbers(text):
+    with pii_redaction_scope():
+        assert redact_pii_text(text) == text
 
 
 def test_redaction_logs_pipeline_counts_without_personal_values(caplog):
