@@ -14,6 +14,8 @@ from app.exceptions.chat_session import (
     ChatSessionNotFoundError,
     ChatSessionServiceError,
 )
+from app.graph.output_guard import validate_plain_final_answer
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE
 from app.schemas.chat_history import (
     ChatHistoryResponse,
     ChatHistoryTurnResponse,
@@ -26,6 +28,22 @@ router = APIRouter(
     tags=['История диалога'],
     dependencies=[VerifyApiKeyDep],
 )
+
+
+def _safe_history_answer(answer: object, *, request_id: str) -> str | None:
+    """Не возвращает клиенту небезопасный output из legacy-записей."""
+    if answer is None:
+        return None
+    decision = validate_plain_final_answer(answer)
+    if decision.accepted and decision.answer is not None:
+        return decision.answer
+    logger.error(
+        '❌ Небезопасный сохранённый ответ скрыт в истории '
+        '(request_id=%s, reason=%s)',
+        request_id,
+        decision.reason,
+    )
+    return UNSAFE_TOOL_CALL_RESPONSE
 
 
 @router.get(
@@ -140,7 +158,10 @@ async def get_chat_history(
                     request_id=turn.request_id,
                     sequence_number=turn.sequence_number,
                     question=turn.question,
-                    answer=turn.answer,
+                    answer=_safe_history_answer(
+                        turn.answer,
+                        request_id=turn.request_id,
+                    ),
                     status=turn.status,
                     feedback_value=(
                         turn.feedback.value

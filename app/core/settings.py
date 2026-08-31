@@ -149,11 +149,10 @@ class RedisSettings(SettingsBase):
 
 
 class LlmSettings(SettingsBase):
-    """Настройки доступа к LLM-провайдеру для графа (Этап 2).
+    """Настройки доступа к OpenAI-совместимому API Polza для графа.
 
-    Провайдер конфигурируется (AGENT_VERA_ARCHITECTURE.md) — любой
-    OpenAI-совместимый Chat Completions API, не захардкожен на конкретного
-    поставщика.
+    Intent/tool-routing использует ``ChatOpenAI``, а финальные узлы — прямую
+    границу Polza Chat Completions, сохраняющую отдельные reasoning-поля.
     """
 
     llm_api_key: SecretStr
@@ -161,10 +160,12 @@ class LlmSettings(SettingsBase):
     llm_model: str = 'google/gemini-3.7-flash'
     llm_temperature: float | None = 0.3
     llm_reasoning_effort: Literal['low'] | None = None
-    """Опциональный режим Polza `reasoning={"effort": "low"}`.
+    """Опциональный payload Polza с ``effort=low`` и ``exclude=false``.
 
-    По умолчанию не меняет payload. В production включается через
-    `LLM_REASONING_EFFORT=low`, поэтому режим можно откатить без правки кода.
+    Это настройка качества/стоимости, а не механизм output safety: безопасность
+    финального ответа обеспечивают разделение каналов, schema и output guard.
+    ``exclude=false`` сохраняет reasoning только для разрешённого content
+    tracing в защищённый Phoenix и не отключает reasoning модели.
     """
 
 

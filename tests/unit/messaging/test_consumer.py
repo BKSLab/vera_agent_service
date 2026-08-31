@@ -115,11 +115,21 @@ class _SessionPiiGraph:
         return _generator()
 
 
-def _token_event(content: str, node: str = 'generate_direct') -> dict:
+def _raw_model_event(content: str, node: str = 'generate_direct') -> dict:
     return {
         'event': 'on_chat_model_stream',
         'metadata': {'langgraph_node': node},
         'data': {'chunk': SimpleNamespace(content=content)},
+    }
+
+
+def _token_event(content: object, node: str = 'generate_direct') -> dict:
+    """Завершённый snapshot с проверенным AIMessage для одного SSE token."""
+    return {
+        'event': 'on_chain_end',
+        'parent_ids': ['graph-run'],
+        'metadata': {'langgraph_node': node},
+        'data': {'output': {'messages': [AIMessage(content=content)]}},
     }
 
 
@@ -178,7 +188,7 @@ async def test_payload_without_request_id_goes_to_dlq_without_calling_graph():
 
 
 async def test_successful_message_streams_tokens_and_acks():
-    graph = _FakeGraph([[_token_event('Квота'), _token_event(' 2%.')]])
+    graph = _FakeGraph([[_token_event('Квота 2%.')]])
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink)
     message = _FakeMessage(
@@ -190,8 +200,7 @@ async def test_successful_message_streams_tokens_and_acks():
     assert message.acked
     assert message.nacked_requeue is None
     assert sink.calls == [
-        ('r1', {'type': 'token', 'content': 'Квота'}),
-        ('r1', {'type': 'token', 'content': ' 2%.'}),
+        ('r1', {'type': 'token', 'content': 'Квота 2%.'}),
         ('r1', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
@@ -595,12 +604,12 @@ async def test_streams_code_authored_final_message_when_model_was_not_called():
     ]
 
 
-async def test_stream_answer_emits_fallback_when_pseudo_stream_has_no_root_snapshot():
+async def test_stream_answer_never_emits_raw_pseudo_stream_without_safe_snapshot():
     graph = _FakeGraph(
         [
             [
-                _token_event('call:default_api:'),
-                _token_event('send_consultation_email{email=user@example.com}'),
+                _raw_model_event('call:default_api:'),
+                _raw_model_event('send_consultation_email{email=user@example.com}'),
             ]
         ]
     )
@@ -617,7 +626,149 @@ async def test_stream_answer_emits_fallback_when_pseudo_stream_has_no_root_snaps
     )
 
     assert 'call:default_api:' not in answer
-    assert 'безопасный ответ' in answer
+    assert answer == ''
+
+
+async def test_confirmed_final_node_raw_stream_is_ignored_in_favor_of_safe_snapshot():
+    incident = 'The user is asking: internal analysis. Rules check: allowed.'
+    graph = _FakeGraph(
+        [
+            [
+                _raw_model_event(incident, node='generate_direct'),
+                _token_event('Только проверенный ответ.', node='generate_direct'),
+            ]
+        ]
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Вопрос',
+    )
+
+    answer = ''.join(
+        [chunk async for chunk in consumer._stream_answer(payload, TurnPersistenceData())]
+    )
+
+    assert answer == 'Только проверенный ответ.'
+    assert incident not in answer
+
+
+async def test_unsafe_final_snapshot_is_not_emitted_as_sse():
+    graph = _FakeGraph(
+        [[_token_event('The user is asking: secret. Rules check: allowed.')]]
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Вопрос',
+    )
+
+    chunks = [
+        chunk
+        async for chunk in consumer._stream_answer(payload, TurnPersistenceData())
+    ]
+
+    assert chunks == []
+
+
+@pytest.mark.parametrize(
+    'unsafe_content',
+    [
+        '   \n\t',
+        'Ответ\x00со скрытым управляющим символом',
+        [{'type': 'reasoning.text', 'text': 'Скрытый разбор'}],
+    ],
+)
+async def test_empty_controlled_or_typed_final_snapshot_is_not_emitted(
+    unsafe_content,
+):
+    graph = _FakeGraph([[_token_event(unsafe_content)]])
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Вопрос',
+    )
+
+    chunks = [
+        chunk
+        async for chunk in consumer._stream_answer(payload, TurnPersistenceData())
+    ]
+
+    assert chunks == []
+
+
+async def test_authoritative_unsafe_root_snapshot_clears_safe_node_answer():
+    root_event = {
+        'event': 'on_chain_end',
+        'parent_ids': [],
+        'data': {
+            'output': {
+                'messages': [
+                    HumanMessage(content='Вопрос'),
+                    AIMessage(content='   '),
+                ]
+            }
+        },
+    }
+    graph = _FakeGraph(
+        [[_token_event('Промежуточный безопасный snapshot.'), root_event]]
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Вопрос',
+    )
+
+    chunks = [
+        chunk
+        async for chunk in consumer._stream_answer(payload, TurnPersistenceData())
+    ]
+
+    assert chunks == []
+
+
+async def test_malformed_graph_events_are_ignored_before_safe_snapshot():
+    graph = _FakeGraph(
+        [
+            [
+                None,
+                {
+                    'event': 'on_chain_end',
+                    'parent_ids': [],
+                    'metadata': None,
+                    'data': None,
+                },
+                {
+                    'event': 'on_chain_end',
+                    'parent_ids': ['graph-run'],
+                    'metadata': {'langgraph_node': ['invalid']},
+                    'data': 'invalid',
+                },
+                _token_event('Проверенный ответ.'),
+            ]
+        ]
+    )
+    consumer = _build_consumer(graph, _TokenSinkRecorder())
+    payload = AgentRequestMessage(
+        session_id='session-1',
+        request_id='request-1',
+        user_id='user-1',
+        message='Вопрос',
+    )
+
+    answer = ''.join(
+        [chunk async for chunk in consumer._stream_answer(payload, TurnPersistenceData())]
+    )
+
+    assert answer == 'Проверенный ответ.'
 
 
 async def test_stream_answer_uses_final_node_snapshot_with_parent_ids():
@@ -722,10 +873,16 @@ async def test_failure_before_streaming_exhausts_retries_goes_to_dlq():
     assert sink.calls[-1] == ('r1', {'type': 'error', 'detail': 'Сервис временно недоступен, попробуйте позже.'})
 
 
-async def test_failure_after_streaming_started_does_not_retry_and_acks():
-    """Ключевой инвариант раздела 0.1: сбой после того как хотя бы один
-    токен уже ушёл в SSE — не повод для повтора всего сообщения."""
-    graph = _FakeGraph([[_token_event('Начало ответа'), RuntimeError('обрыв соединения с LLM')]])
+async def test_raw_model_chunk_does_not_start_sse_and_graph_can_retry_safely():
+    graph = _FakeGraph(
+        [
+            [
+                _raw_model_event('Сырой небезопасный префикс'),
+                RuntimeError('обрыв соединения с LLM'),
+            ],
+            [_token_event('Полный проверенный ответ')],
+        ]
+    )
     sink = _TokenSinkRecorder()
     consumer = _build_consumer(graph, sink, retries=3)
     message = _FakeMessage(
@@ -734,12 +891,12 @@ async def test_failure_after_streaming_started_does_not_retry_and_acks():
 
     await consumer._handle_message(message)
 
-    assert graph.call_count == 1
+    assert graph.call_count == 2
     assert message.acked
     assert message.nacked_requeue is None
     assert sink.calls == [
-        ('r1', {'type': 'token', 'content': 'Начало ответа'}),
-        ('r1', {'type': 'error', 'detail': 'Произошла ошибка при формировании ответа.'}),
+        ('r1', {'type': 'token', 'content': 'Полный проверенный ответ'}),
+        ('r1', {'type': 'done', 'used_knowledge_base': False}),
     ]
 
 
@@ -785,8 +942,7 @@ async def test_successful_message_persists_question_answer_and_sources():
                         }
                     },
                 },
-                _token_event('Полный '),
-                _token_event('ответ'),
+                _token_event('Полный ответ'),
             ]
         ]
     )
@@ -829,6 +985,13 @@ async def test_successful_message_persists_question_answer_and_sources():
     assert complete_call['answer'] == 'Полный ответ'
     assert complete_call['sources'] == [{'document_id': 'doc-1'}]
     assert complete_call['technical_metadata']['tool_calls'] == ['vera_rag_kb']
+    sse_answer = ''.join(
+        event['content']
+        for _request_id, event in sink.calls
+        if event.get('type') == 'token'
+    )
+    final_ai_message = graph._events_per_call[0][-1]['data']['output']['messages'][0]
+    assert sse_answer == final_ai_message.content == complete_call['answer']
     assert message.acked is True
 
 

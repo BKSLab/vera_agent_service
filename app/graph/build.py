@@ -2,6 +2,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
+from app.clients.polza_final_response import FinalResponseGenerator
 from app.core.settings import GraphContextSettings, McpSettings
 from app.graph.edges import route_after_analyze_intent
 from app.graph.nodes.analyze_intent import create_analyze_intent_node
@@ -16,6 +17,7 @@ from app.graph.state import AgentState
 
 def build_graph(
     chat_model: ChatOpenAI,
+    final_response_generator: FinalResponseGenerator,
     kb_search_tool: BaseTool,
     consultation_email_tool: BaseTool,
     mcp_settings: McpSettings,
@@ -54,9 +56,12 @@ def build_graph(
     )
     builder.add_node(
         'generate_with_context',
-        create_generate_with_context_node(chat_model, context_settings),
+        create_generate_with_context_node(final_response_generator, context_settings),
     )
-    builder.add_node('generate_direct', create_generate_direct_node(chat_model, context_settings))
+    builder.add_node(
+        'generate_direct',
+        create_generate_direct_node(final_response_generator, context_settings),
+    )
 
     builder.add_edge(START, 'analyze_intent')
     builder.add_conditional_edges(

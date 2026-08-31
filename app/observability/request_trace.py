@@ -24,6 +24,11 @@ class AgentRequestTraceData:
     response_chunk_count: int = 0
     response_char_count: int = 0
     streaming_started: bool = False
+    output_guard_status: str = 'not_run'
+    output_guard_reason: str = 'not_run'
+    output_guard_retry_count: int = 0
+    output_guard_raw_char_count: int = 0
+    output_guard_final_char_count: int = 0
     mutating_tool_called: bool = False
     consultation_email_status: str | None = None
     consultation_email_error_code: str | None = None

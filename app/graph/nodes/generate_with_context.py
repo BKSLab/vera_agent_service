@@ -1,14 +1,14 @@
+import logging
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 from langchain_core.messages import AIMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
-from app.clients.llm import astream_tokens
+from app.clients.polza_final_response import FinalResponseGenerator
 from app.core.settings import GraphContextSettings
-from app.exceptions.llm import EmptyLlmStreamError
 from app.graph.context_budget import build_bounded_messages
-from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE, contains_pseudo_tool_call
+from app.graph.output_guard import validate_plain_final_answer
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE
 from app.graph.prompts.context import (
     NO_ANSWER_INSTRUCTION,
     SEARCH_UNAVAILABLE_INSTRUCTION,
@@ -17,12 +17,14 @@ from app.graph.prompts.context import (
 from app.graph.prompts.system import FINAL_RESPONSE_SYSTEM_PROMPT
 from app.graph.state import AgentState
 
+logger = logging.getLogger('vera_agent_service')
+
 
 def create_generate_with_context_node(
-    chat_model: ChatOpenAI,
+    final_response_generator: FinalResponseGenerator,
     context_settings: GraphContextSettings,
 ) -> Callable[[AgentState], Coroutine[Any, Any, dict]]:
-    """Создаёт узел `generate_with_context` (Этап 4.3) — стримингованная
+    """Создаёт узел `generate_with_context` (Этап 4.3) — проверенная
     финальная генерация с чанками `vera_rag_kb` в контексте.
 
     Три ветки инструкции в зависимости от результата `call_kb_search`
@@ -30,12 +32,8 @@ def create_generate_with_context_node(
     поиск технически недоступен — намеренно разные сообщения пользователю,
     не должны схлопываться в одинаковый текст.
 
-    Стриминг токенов наружу (в SSE) не является ответственностью этого
-    узла — узел лишь вызывает `model.astream()` через `astream_tokens`;
-    внешний потребитель (RabbitMQ-consumer, Этап 6) слушает эти токены
-    через `graph.astream_events(...)`, перехватывая события
-    `on_chat_model_stream`, которые LangGraph автоматически генерирует по
-    мере вызова модели внутри узла.
+    Финальный provider stream полностью буферизуется, reasoning отделяется,
+    а ``AIMessage`` создаётся только после строгой проверки всего ответа.
 
     Модели передаётся ограниченное по бюджету представление истории
     (`context_settings`, VERA-020) — найденные чанки берутся из
@@ -62,22 +60,18 @@ def create_generate_with_context_node(
             SystemMessage(content=instruction),
         ]
 
-        full_text = ''
-        async for token in astream_tokens(chat_model, messages):
-            full_text += token
-
-        if not full_text:
-            raise EmptyLlmStreamError
-
-        if contains_pseudo_tool_call(full_text):
-            # Узел всё равно может быть вызван напрямую (мимо consumer), а
-            # служебный синтаксис не должен попасть ни в историю, ни в SSE.
-            return {
-                'messages': [
-                    AIMessage(content=UNSAFE_TOOL_CALL_RESPONSE)
-                ]
-            }
-
-        return {'messages': [AIMessage(content=full_text)]}
+        answer = await final_response_generator.generate_final_answer(
+            messages,
+            node_name='generate_with_context',
+        )
+        decision = validate_plain_final_answer(answer)
+        if not decision.accepted or decision.answer is None:
+            logger.error(
+                '❌ Небезопасный ответ отклонён на границе generate_with_context '
+                '(reason=%s)',
+                decision.reason,
+            )
+            answer = UNSAFE_TOOL_CALL_RESPONSE
+        return {'messages': [AIMessage(content=answer)]}
 
     return generate_with_context

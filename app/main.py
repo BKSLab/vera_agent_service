@@ -20,13 +20,14 @@ from app.api.v1.endpoints.health import create_health_router
 from app.api.v1.endpoints.message_feedback import router as message_feedback_router
 from app.api.v1.endpoints.session_feedback import router as session_feedback_router
 from app.checkpoint.redis_saver import get_redis_checkpointer
-from app.clients.http_client import external_api_http_client
+from app.clients.http_client import create_external_api_http_client
 from app.clients.llm import get_chat_model
 from app.clients.mcp_client import (
     build_consultation_email_tool_proxy,
     build_kb_search_tool_proxy,
     get_mcp_client,
 )
+from app.clients.polza_final_response import PolzaFinalResponseClient
 from app.core.config_logger import logger
 from app.core.rate_limit import limiter
 from app.core.settings import get_settings
@@ -95,7 +96,10 @@ async def lifespan(app: FastAPI):
 
     try:
         async with AsyncExitStack() as stack:
-            stack.push_async_callback(external_api_http_client.aclose)
+            external_api_http_client = await stack.enter_async_context(
+                create_external_api_http_client()
+            )
+            app.state.external_api_http_client = external_api_http_client
             await session_bus.start()
             stack.push_async_callback(session_bus.stop)
 
@@ -116,6 +120,11 @@ async def lifespan(app: FastAPI):
             stack.push_async_callback(redis_health_client.aclose)
 
             chat_model = get_chat_model(httpx_client=external_api_http_client, settings=settings.llm)
+            final_response_generator = PolzaFinalResponseClient(
+                external_api_http_client,
+                settings.llm,
+                trace_content_enabled=settings.observability.trace_content_enabled,
+            )
             mcp_client = get_mcp_client(settings=settings.mcp)
             # Локальный прокси-тул — не требует доступности MCP Tools Server
             # на старте приложения: обе удалённые тулы резолвятся лениво,
@@ -127,6 +136,7 @@ async def lifespan(app: FastAPI):
 
             graph = build_graph(
                 chat_model,
+                final_response_generator,
                 kb_search_tool,
                 consultation_email_tool,
                 settings.mcp,

@@ -1,7 +1,4 @@
-import json
-
-import httpx
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.core.settings import GraphContextSettings
 from app.graph.nodes.generate_with_context import create_generate_with_context_node
@@ -10,7 +7,7 @@ from app.graph.prompts.context import (
     NO_SEARCH_PERFORMED_INSTRUCTION,
     SEARCH_UNAVAILABLE_INSTRUCTION,
 )
-from tests.unit.graph._mock_llm import chat_model_with_handler, stream_response
+from tests.unit.graph._mock_llm import FakeFinalResponseGenerator
 
 _CONTEXT_SETTINGS = GraphContextSettings()
 
@@ -26,29 +23,30 @@ def _state(retrieved_chunks, search_unavailable):
     }
 
 
-def _system_message_contents(request: httpx.Request) -> list[str]:
-    payload = json.loads(request.content)
-    return [message['content'] for message in payload['messages'] if message['role'] == 'system']
+def _system_message_contents(messages) -> list[str]:
+    return [
+        message.content
+        for message in messages
+        if isinstance(message, SystemMessage)
+    ]
 
 
-def _last_system_message_content(request: httpx.Request) -> str:
-    return _system_message_contents(request)[-1]
+def _last_system_message_content(messages) -> str:
+    return _system_message_contents(messages)[-1]
 
 
 async def test_branch_with_chunks_includes_chunk_text_in_instruction():
     captured = {}
 
-    def handler(request):
-        captured['instruction'] = _last_system_message_content(request)
-        return stream_response(
-            [
-                'Квота 2%.\n\n',
-                'Основание: статья 21 Федерального закона № 181-ФЗ.',
-            ]
+    def handler(messages, _node):
+        captured['instruction'] = _last_system_message_content(messages)
+        return (
+            'Квота 2%.\n\n'
+            'Основание: статья 21 Федерального закона № 181-ФЗ.'
         )
 
-    chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
+    generator = FakeFinalResponseGenerator(handler)
+    node = create_generate_with_context_node(generator, _CONTEXT_SETTINGS)
     chunks = [
         {
             'chunk_id': 'c1',
@@ -75,12 +73,12 @@ async def test_branch_with_chunks_includes_chunk_text_in_instruction():
 async def test_branch_with_chunks_marks_missing_source_details_without_inventing_them():
     captured = {}
 
-    def handler(request):
-        captured['instruction'] = _last_system_message_content(request)
-        return stream_response(['Ответ.', ' Основание: источник из базы знаний.'])
+    def handler(messages, _node):
+        captured['instruction'] = _last_system_message_content(messages)
+        return 'Ответ. Основание: источник из базы знаний.'
 
-    chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
+    generator = FakeFinalResponseGenerator(handler)
+    node = create_generate_with_context_node(generator, _CONTEXT_SETTINGS)
     chunks = [{'chunk_id': 'c1', 'source_title': 'Разъяснение Роструда', 'text': 'Текст нормы'}]
 
     await node(_state(chunks, search_unavailable=False))
@@ -94,12 +92,12 @@ async def test_branch_with_chunks_marks_missing_source_details_without_inventing
 async def test_branch_no_answer_when_chunks_empty_and_search_available():
     captured = {}
 
-    def handler(request):
-        captured['system_messages'] = _system_message_contents(request)
-        return stream_response(['В базе знаний нет ответа на этот вопрос.'])
+    def handler(messages, _node):
+        captured['system_messages'] = _system_message_contents(messages)
+        return 'В базе знаний нет ответа на этот вопрос.'
 
-    chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
+    generator = FakeFinalResponseGenerator(handler)
+    node = create_generate_with_context_node(generator, _CONTEXT_SETTINGS)
 
     result = await node(_state([], search_unavailable=False))
 
@@ -113,12 +111,12 @@ async def test_branch_no_answer_when_chunks_empty_and_search_available():
 async def test_branch_search_unavailable_differs_from_no_answer_branch():
     captured = {}
 
-    def handler(request):
-        captured['system_messages'] = _system_message_contents(request)
-        return stream_response(['Поиск сейчас недоступен, попробуйте позже.'])
+    def handler(messages, _node):
+        captured['system_messages'] = _system_message_contents(messages)
+        return 'Поиск сейчас недоступен, попробуйте позже.'
 
-    chat_model = chat_model_with_handler(handler)
-    node = create_generate_with_context_node(chat_model, _CONTEXT_SETTINGS)
+    generator = FakeFinalResponseGenerator(handler)
+    node = create_generate_with_context_node(generator, _CONTEXT_SETTINGS)
 
     result = await node(_state([], search_unavailable=True))
 

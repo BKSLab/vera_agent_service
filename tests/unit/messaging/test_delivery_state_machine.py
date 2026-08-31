@@ -12,26 +12,25 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from langchain_core.messages import AIMessage
 
 from app.db.models.chat_turn import (
     STATUS_COMPLETED,
     STATUS_DELIVERY_UNCONFIRMED,
     STATUS_GENERATION_FAILED,
     STATUS_PROCESSING,
-    STATUS_STREAM_INTERRUPTED,
 )
 from app.exceptions.chat_turn import ChatPersistenceServiceError
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE
 from app.messaging.consumer import (
     COMMIT_FAILED_MESSAGE,
     DUPLICATE_IN_PROGRESS_MESSAGE,
     GENERATION_FAILED_MESSAGE,
     MUTATING_TOOL_UNCONFIRMED_MESSAGE,
     SHUTDOWN_MESSAGE,
-    STREAM_INTERRUPTED_MESSAGE,
     AgentRequestConsumer,
 )
 from app.observability.request_trace import get_request_trace
@@ -114,9 +113,10 @@ class _MutatingFailureGraph:
 
 def _token_event(content: str) -> dict:
     return {
-        'event': 'on_chat_model_stream',
+        'event': 'on_chain_end',
+        'parent_ids': ['graph-run'],
         'metadata': {'langgraph_node': 'generate_direct'},
-        'data': {'chunk': SimpleNamespace(content=content)},
+        'data': {'output': {'messages': [AIMessage(content=content)]}},
     }
 
 
@@ -222,10 +222,10 @@ async def test_empty_stream_is_content_error_not_done():
     ]
     service.complete_turn.assert_not_awaited()
     assert service.fail_turn.await_args.kwargs['status'] == STATUS_GENERATION_FAILED
-    # Пустой ответ уже получил локальные retries в `astream_tokens`; повтор
-    # всего графа и повторная доставка через DLQ только заново запускают тот
-    # же плохой LLM-ответ. Клиент получает терминальную ошибку, сообщение
-    # подтверждается, а пользователь может повторить запрос новой репликой.
+    # Финальный клиент уже выполнил локальные retries; повтор всего графа и
+    # повторная доставка через DLQ только заново запускают тот же плохой
+    # LLM-ответ. Клиент получает терминальную ошибку, сообщение подтверждается,
+    # а пользователь может повторить запрос новой репликой.
     assert message.ack_count == 1
     assert message.nacked_requeue is None
     assert message.settlements == 1
@@ -248,7 +248,7 @@ async def test_failure_before_first_token_goes_to_dlq_as_generation_failed():
     assert message.settlements == 1
 
 
-async def test_failure_after_first_token_is_stream_interrupted_and_acked():
+async def test_failure_after_final_snapshot_does_not_publish_partial_answer():
     graph = _ScriptedGraph([[_token_event('Часть'), RuntimeError('обрыв')]])
     sink = _TokenSinkRecorder()
     service = _persistence()
@@ -258,13 +258,13 @@ async def test_failure_after_first_token_is_stream_interrupted_and_acked():
     await consumer._handle_message(message)
 
     assert sink.terminal_events == [
-        {'type': 'error', 'detail': STREAM_INTERRUPTED_MESSAGE}
+        {'type': 'error', 'detail': GENERATION_FAILED_MESSAGE}
     ]
     fail_call = service.fail_turn.await_args.kwargs
-    assert fail_call['status'] == STATUS_STREAM_INTERRUPTED
-    assert fail_call['answer'] == 'Часть'
-    # Повторная обработка показала бы пользователю ответ дважды.
-    assert message.ack_count == 1
+    assert fail_call['status'] == STATUS_GENERATION_FAILED
+    assert fail_call['answer'] is None
+    assert not any(event.get('type') == 'token' for event in sink.events)
+    assert message.nacked_requeue is False
     assert message.settlements == 1
 
 
@@ -318,6 +318,48 @@ async def test_duplicate_completed_replays_saved_answer_and_done():
     ]
     assert graph.call_count == 0
     assert message.ack_count == 1
+
+
+@pytest.mark.parametrize(
+    'stored_answer',
+    [
+        None,
+        42,
+        '',
+        '   ',
+        'The user is asking: hidden reasoning. Rules check: allowed.',
+        '<think>Скрытый разбор</think>Ответ пользователю',
+    ],
+)
+async def test_duplicate_completed_never_replays_unsafe_legacy_answer(
+    stored_answer,
+    caplog,
+):
+    sink = _TokenSinkRecorder()
+    service = _persistence(
+        START_DUPLICATE_TERMINAL,
+        status=STATUS_COMPLETED,
+        answer=stored_answer,
+    )
+    graph = _ScriptedGraph([[]])
+    consumer = _build_consumer(graph, sink, service)
+    message = _FakeMessage(_payload())
+
+    await consumer._handle_message(message)
+
+    assert sink.events == [
+        {'type': 'token', 'content': UNSAFE_TOOL_CALL_RESPONSE},
+        {'type': 'done', 'used_knowledge_base': False},
+    ]
+    assert (
+        not isinstance(stored_answer, str)
+        or not stored_answer.strip()
+        or stored_answer not in str(sink.events)
+    )
+    assert graph.call_count == 0
+    assert message.ack_count == 1
+    if isinstance(stored_answer, str) and stored_answer.strip():
+        assert stored_answer not in caplog.text
 
 
 async def test_duplicate_delivery_unconfirmed_replays_error_not_done():

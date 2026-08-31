@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -108,6 +110,190 @@ def test_pseudo_tool_call_is_removed_from_old_turn_summary():
     assert 'Предыдущий ответ не был сформирован.' in result[0].content
 
 
+def test_reasoning_like_incident_is_removed_from_recent_history():
+    leaked = 'The user is asking: what name is visible? Rules check: do not disclose.'
+    messages = [
+        HumanMessage(content='Какое имя видно?'),
+        AIMessage(content=leaked),
+        HumanMessage(content='Продолжим'),
+    ]
+
+    result = build_bounded_messages(
+        messages,
+        max_turns=5,
+        older_turns_summary_max_chars=200,
+    )
+
+    assert result[1].content == 'Предыдущий ответ не был сформирован.'
+    assert leaked not in [message.content for message in result]
+
+
+def test_reasoning_like_incident_is_removed_from_old_turn_summary():
+    messages = [
+        HumanMessage(content='Первый вопрос'),
+        AIMessage(content='Пользователь спрашивает о правилах. Проверка правил завершена.'),
+        HumanMessage(content='Последний вопрос'),
+        AIMessage(content='Обычный ответ'),
+    ]
+
+    result = build_bounded_messages(
+        messages,
+        max_turns=1,
+        older_turns_summary_max_chars=200,
+    )
+
+    assert 'Пользователь спрашивает' not in result[0].content
+    assert 'Предыдущий ответ не был сформирован.' in result[0].content
+
+
+def test_typed_reasoning_and_reasoning_metadata_are_removed_from_recent_history(
+    caplog,
+):
+    leaked = 'Скрытый typed reasoning'
+    message = AIMessage(
+        content=[
+            {'type': 'reasoning.text', 'text': leaked},
+            {'type': 'text', 'text': 'Обычный ответ.'},
+        ],
+        additional_kwargs={
+            'reasoning': leaked,
+            'reasoning_content': leaked,
+            'reasoning_details': [{'type': 'reasoning.text', 'text': leaked}],
+            'safe_metadata': 'preserve',
+        },
+    )
+    messages = [
+        HumanMessage(content='Первый вопрос'),
+        message,
+        HumanMessage(content='Продолжим'),
+    ]
+
+    with caplog.at_level(logging.WARNING, logger='vera_agent_service'):
+        result = build_bounded_messages(
+            messages,
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+    sanitized = result[1]
+    assert sanitized.content == 'Предыдущий ответ не был сформирован.'
+    assert sanitized.additional_kwargs == {'safe_metadata': 'preserve'}
+    assert leaked not in str(sanitized)
+    assert leaked not in caplog.text
+    assert 'removed_fields=3' in caplog.text
+    assert 'content_kind=typed_blocks' in caplog.text
+
+
+def test_reasoning_marker_split_between_typed_text_blocks_is_removed():
+    message = AIMessage(
+        content=[
+            {'type': 'text', 'text': 'The user is '},
+            {'type': 'output_text', 'text': {'value': 'asking: hidden.'}},
+        ]
+    )
+
+    result = build_bounded_messages(
+        [HumanMessage(content='Вопрос'), message, HumanMessage(content='Дальше')],
+        max_turns=5,
+        older_turns_summary_max_chars=200,
+    )
+
+    assert result[1].content == 'Предыдущий ответ не был сформирован.'
+
+
+def test_nested_reasoning_metadata_is_removed_from_all_ai_metadata():
+    leaked = 'Скрытый nested reasoning'
+    message = AIMessage(
+        content='Обычный ответ.',
+        additional_kwargs={
+            'provider': {
+                'reasoning_summary': leaked,
+                'safe': 'preserve',
+            }
+        },
+        response_metadata={
+            'analysis': leaked,
+            'nested': {'thinking': leaked, 'safe': 42},
+        },
+    )
+
+    result = build_bounded_messages(
+        [HumanMessage(content='Вопрос'), message],
+        max_turns=5,
+        older_turns_summary_max_chars=200,
+    )
+
+    sanitized = result[1]
+    assert sanitized.content == 'Обычный ответ.'
+    assert sanitized.additional_kwargs == {
+        'provider': {'safe': 'preserve'},
+    }
+    assert sanitized.response_metadata == {'nested': {'safe': 42}}
+    assert leaked not in str(sanitized)
+
+
+def test_reasoning_hidden_in_typed_text_block_metadata_is_replaced():
+    leaked = 'Скрытый reasoning в metadata блока'
+    message = AIMessage(
+        content=[
+            {
+                'type': 'text',
+                'text': 'Обычный видимый ответ.',
+                'metadata': {'reasoning': leaked},
+            }
+        ]
+    )
+
+    result = build_bounded_messages(
+        [HumanMessage(content='Вопрос'), message],
+        max_turns=5,
+        older_turns_summary_max_chars=200,
+    )
+
+    assert result[1].content == 'Предыдущий ответ не был сформирован.'
+    assert leaked not in str(result[1])
+
+
+def test_typed_reasoning_is_replaced_in_old_turn_summary():
+    leaked = 'Скрытый reasoning старой реплики'
+    messages = [
+        HumanMessage(content='Старый вопрос'),
+        AIMessage(
+            content=[
+                {'type': 'reasoning.text', 'text': leaked},
+                {'type': 'text', 'text': 'Видимая часть'},
+            ]
+        ),
+        HumanMessage(content='Новый вопрос'),
+        AIMessage(content='Новый ответ'),
+    ]
+
+    result = build_bounded_messages(
+        messages,
+        max_turns=1,
+        older_turns_summary_max_chars=200,
+    )
+
+    assert leaked not in result[0].content
+    assert 'Предыдущий ответ не был сформирован.' in result[0].content
+
+
+def test_safe_typed_text_history_is_preserved():
+    content = [
+        {'type': 'text', 'text': 'Первая часть. '},
+        {'type': 'output_text', 'text': {'value': 'Вторая часть.'}},
+    ]
+    message = AIMessage(content=content)
+
+    result = build_bounded_messages(
+        [HumanMessage(content='Вопрос'), message],
+        max_turns=5,
+        older_turns_summary_max_chars=200,
+    )
+
+    assert result[1].content == content
+
+
 def test_personal_data_is_removed_from_all_message_fields_before_model_call():
     email = 'ivan.petrov@example.com'
     full_name = 'Иванов Иван Иванович'
@@ -189,6 +375,27 @@ def test_ai_and_tool_emails_are_redacted_but_not_authorized():
         for value in ('[EMAIL_1]', '[EMAIL_2]', ai_email, tool_email):
             with pytest.raises(UnresolvedEmailError):
                 resolve_email_for_tool(value)
+
+
+def test_human_response_metadata_does_not_authorize_email():
+    metadata_email = 'metadata@example.com'
+    message = HumanMessage(
+        content='Обычный вопрос без адреса',
+        response_metadata={'email': metadata_email},
+    )
+
+    with pii_redaction_scope() as context:
+        result = build_bounded_messages(
+            [message],
+            max_turns=5,
+            older_turns_summary_max_chars=200,
+        )
+
+        assert metadata_email not in str(result[0].response_metadata)
+        assert '[EMAIL_1]' in str(result[0].response_metadata)
+        assert context.export() == {}
+        with pytest.raises(UnresolvedEmailError):
+            resolve_email_for_tool('[EMAIL_1]')
 
 
 def test_only_human_email_is_exported_and_resolvable():

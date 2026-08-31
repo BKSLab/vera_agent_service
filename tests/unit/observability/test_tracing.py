@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from langchain_core.messages import AIMessage
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from opentelemetry import propagate, trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -157,16 +158,35 @@ class _DegradedGraph:
         return _generator()
 
 
-class _Chunk:
-    def __init__(self, content: str):
-        self.content = content
+class _OutputGuardGraph:
+    def astream_events(self, state, config, version='v2'):
+        async def _generator():
+            trace_data = get_request_trace()
+            trace_data.route = 'direct'
+            trace_data.output_guard_status = 'retried'
+            trace_data.output_guard_reason = 'meta_reasoning'
+            trace_data.output_guard_retry_count = 1
+            trace_data.output_guard_raw_char_count = 120
+            trace_data.output_guard_final_char_count = 15
+            yield _stream_event('Безопасный ответ')
+
+        return _generator()
 
 
 def _stream_event(content: str, node: str = 'generate_direct') -> dict:
     return {
+        'event': 'on_chain_end',
+        'parent_ids': ['graph-run'],
+        'metadata': {'langgraph_node': node},
+        'data': {'output': {'messages': [AIMessage(content=content)]}},
+    }
+
+
+def _raw_model_event(content: str, node: str = 'generate_direct') -> dict:
+    return {
         'event': 'on_chat_model_stream',
         'metadata': {'langgraph_node': node},
-        'data': {'chunk': _Chunk(content)},
+        'data': {'chunk': type('Chunk', (), {'content': content})()},
     }
 
 
@@ -269,12 +289,7 @@ async def test_publish_many_tokens_does_not_create_sse_spans():
 
 
 async def test_agent_root_can_be_created_without_full_content():
-    graph = _FakeGraph(
-        [
-            _stream_event('A'),
-            _stream_event('Б'),
-        ]
-    )
+    graph = _FakeGraph([_stream_event('AБ')])
     consumer = _build_consumer(graph)
 
     await consumer._handle_message(_FakeMessage())
@@ -285,7 +300,7 @@ async def test_agent_root_can_be_created_without_full_content():
     assert span.parent is None
     assert span.attributes['agent.route'] == 'direct'
     assert span.attributes['agent.tool_call_count'] == 0
-    assert span.attributes['agent.response.chunk_count'] == 2
+    assert span.attributes['agent.response.chunk_count'] == 1
     assert span.attributes['agent.response.char_count'] == 2
     assert span.attributes['agent.outcome'] == 'done'
     assert 'input.value' not in span.attributes
@@ -333,6 +348,19 @@ async def test_agent_root_records_question_and_answer():
     assert span.attributes['agent.input.char_count'] == 8
     assert span.attributes['agent.response.char_count'] == 6
     assert span.attributes['user.authenticated'] is True
+
+
+async def test_agent_root_records_output_guard_aggregates():
+    consumer = _build_consumer(_OutputGuardGraph())
+
+    await consumer._handle_message(_FakeMessage())
+
+    span = _finished_span('vera.agent.request')
+    assert span.attributes['vera.llm.output_guard.status'] == 'retried'
+    assert span.attributes['vera.llm.output_guard.reason'] == 'meta_reasoning'
+    assert span.attributes['vera.llm.output_guard.retry_count'] == 1
+    assert span.attributes['vera.llm.output_guard.raw_char_count'] == 120
+    assert span.attributes['vera.llm.output_guard.final_char_count'] == 15
 
 
 async def test_tool_span_is_child_of_agent_root_in_same_trace():
@@ -391,13 +419,14 @@ async def test_retry_before_streaming_resets_output_and_is_counted():
     assert root.status.status_code is StatusCode.UNSET
 
 
-async def test_error_after_first_token_is_terminal_root_error_without_retry():
+async def test_raw_model_event_does_not_mark_streaming_started_before_retry():
     graph = _SequenceGraph(
         [
             [
-                _stream_event('partial'),
+                _raw_model_event('partial'),
                 RuntimeError('stream interrupted'),
-            ]
+            ],
+            [_stream_event('final')],
         ]
     )
     consumer = _build_consumer(graph)
@@ -406,13 +435,13 @@ async def test_error_after_first_token_is_terminal_root_error_without_retry():
     await consumer._handle_message(message)
 
     root = _finished_span('vera.agent.request')
-    assert graph.call_count == 1
+    assert graph.call_count == 2
     assert message.acked is True
-    assert root.attributes['agent.outcome'] == 'error'
+    assert root.attributes['agent.outcome'] == 'done'
     assert root.attributes['agent.streaming.started'] is True
-    assert root.attributes['agent.response.char_count'] == 7
+    assert root.attributes['agent.response.char_count'] == 5
     assert 'output.value' not in root.attributes
-    assert root.status.status_code is StatusCode.ERROR
+    assert root.status.status_code is StatusCode.UNSET
 
 
 async def test_mcp_degradation_is_not_root_error():

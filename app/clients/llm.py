@@ -72,12 +72,12 @@ def get_chat_model(httpx_client: httpx.AsyncClient, settings: LlmSettings) -> Ch
     Возвращает "сырой" `ChatOpenAI`, не обёрнутый ретраями: `.bind_tools()`
     (Этап 4.1) нужно вызывать на этом объекте до применения ретраев —
     `Runnable.with_retry()` не сохраняет метод `bind_tools` у обёрнутого
-    объекта. Ретраи применяются явно через `ainvoke_with_retry`/
-    `astream_tokens` ниже, в месте фактического вызова (граф, Этап 4).
+    объекта. Для intent/tool-routing ретраи применяются явно через
+    `ainvoke_with_retry`. Финальные ответы обрабатывает отдельный прямой
+    Polza-клиент с собственной retry/output-safety политикой.
 
-    `max_retries=0` — повторы делает не сам openai SDK, а ainvoke_with_retry/
-    astream_tokens, чтобы не задваивать retry-политику и логи двух разных
-    механизмов.
+    `max_retries=0` — повторы делает не сам openai SDK, а вызывающая граница,
+    чтобы не задваивать retry-политику и логи двух разных механизмов.
     """
     chat_model_kwargs: dict[str, object] = {
         'model': settings.llm_model,
@@ -162,7 +162,11 @@ async def astream_tokens(
     messages: list[BaseMessage],
     retries: int = DEFAULT_RETRIES,
 ) -> AsyncIterator[str]:
-    """Стримингованный вызов модели (генерация ответа, Этап 4.3/4.4).
+    """Низкоуровневый compatibility-helper для текстового model stream.
+
+    Финальные пользовательские узлы его больше не используют: их прямая
+    Polza-граница полностью буферизует и проверяет structured output, а
+    consumer безусловно игнорирует ``on_chat_model_stream``.
 
     Ретраится только получение **первого видимого текстового токена** —
     служебные role/reasoning/tool-call чанки и финальный DONE не считаются

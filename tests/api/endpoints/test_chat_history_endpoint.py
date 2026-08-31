@@ -15,6 +15,7 @@ from app.exceptions.chat_session import (
     ChatSessionAccessDeniedError,
     ChatSessionNotFoundError,
 )
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE
 from app.main import app
 from app.services.chat_history import ChatHistoryPage, ChatHistoryService
 from app.services.chat_session_lifecycle import ChatSessionLifecycleService
@@ -212,6 +213,77 @@ async def test_chat_history_endpoint_reports_no_knowledge_base_use_without_sourc
 
     assert response.status_code == 200
     assert response.json()['turns'][0]['used_knowledge_base'] is False
+
+
+@pytest.mark.asyncio
+async def test_chat_history_endpoint_never_returns_unsafe_legacy_answer(caplog):
+    now = datetime.now(UTC)
+    unsafe_answer = (
+        'The user is asking: hidden reasoning. Rules check: allowed. '
+        'Пользовательский итог.'
+    )
+    service = AsyncMock(spec=ChatHistoryService)
+    service.get_history.return_value = ChatHistoryPage(
+        turns=[
+            SimpleNamespace(
+                request_id='unsafe-request',
+                sequence_number=1,
+                question='Вопрос',
+                answer=unsafe_answer,
+                status='completed',
+                feedback=None,
+                sources=[],
+                created_at=now,
+                completed_at=now,
+            ),
+            SimpleNamespace(
+                request_id='empty-request',
+                sequence_number=2,
+                question='Вопрос',
+                answer='   ',
+                status='completed',
+                feedback=None,
+                sources=[],
+                created_at=now,
+                completed_at=now,
+            ),
+            SimpleNamespace(
+                request_id='unfinished-request',
+                sequence_number=3,
+                question='Вопрос',
+                answer=None,
+                status='generation_failed',
+                feedback=None,
+                sources=[],
+                created_at=now,
+                completed_at=now,
+            ),
+        ],
+        next_before_sequence=None,
+    )
+    app.dependency_overrides[get_chat_history_service] = lambda: service
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url='http://test',
+    ) as client:
+        response = await client.get(
+            '/api/v1/chat/sessions/session-1/history',
+            headers={
+                'X-API-Key': get_settings().app.api_key.get_secret_value(),
+            },
+        )
+
+    assert response.status_code == 200
+    answers = [turn['answer'] for turn in response.json()['turns']]
+    assert answers == [
+        UNSAFE_TOOL_CALL_RESPONSE,
+        UNSAFE_TOOL_CALL_RESPONSE,
+        None,
+    ]
+    assert unsafe_answer not in response.text
+    assert unsafe_answer not in caplog.text
 
 
 @pytest.mark.asyncio

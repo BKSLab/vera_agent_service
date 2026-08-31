@@ -15,6 +15,7 @@ import aio_pika
 import httpx
 import pytest
 from fastapi import FastAPI
+from langchain_core.messages import AIMessage
 
 from app.core.settings import get_settings
 from app.messaging.consumer import AgentRequestConsumer
@@ -38,11 +39,20 @@ class _FakeGraph:
         return _generator()
 
 
-def _token_event(content: str) -> dict:
+def _raw_model_event(content: str) -> dict:
     return {
         'event': 'on_chat_model_stream',
         'metadata': {'langgraph_node': 'generate_direct'},
         'data': {'chunk': SimpleNamespace(content=content)},
+    }
+
+
+def _final_event(content: str) -> dict:
+    return {
+        'event': 'on_chain_end',
+        'parent_ids': ['graph-run'],
+        'metadata': {'langgraph_node': 'generate_direct'},
+        'data': {'output': {'messages': [AIMessage(content=content)]}},
     }
 
 
@@ -54,7 +64,14 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
     queue_name, dlq_name = f'agent.requests.pipeline.{suffix}', f'agent.requests.pipeline.{suffix}.dlq'
 
     session_bus = SessionBus()
-    graph = _FakeGraph([_token_event('Квота '), _token_event('составляет 2%.')])
+    graph = _FakeGraph(
+        [
+            _raw_model_event(
+                'The user is asking: internal reasoning. Rules check: allowed.'
+            ),
+            _final_event('Квота составляет 2%.'),
+        ]
+    )
     consumer = AgentRequestConsumer(
         connection_url=settings.rabbitmq.url_connect,
         queue_name=queue_name,
@@ -122,9 +139,8 @@ async def test_message_published_to_rabbitmq_streams_via_real_sse_client():
         await http_client.aclose()
 
     assert received == [
-        {'type': 'token', 'content': 'Квота '},
-        {'type': 'token', 'content': 'составляет 2%.'},
+        {'type': 'token', 'content': 'Квота составляет 2%.'},
         {'type': 'done', 'used_knowledge_base': False},
     ]
-    assert event_ids == [1, 2, 3]
+    assert event_ids == [1, 2]
     assert sum(event['type'] in ('done', 'error') for event in received) == 1

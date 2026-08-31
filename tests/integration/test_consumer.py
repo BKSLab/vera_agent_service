@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import aio_pika
 import pytest
+from langchain_core.messages import AIMessage
 
 from app.core.settings import get_settings
 from app.messaging.consumer import AgentRequestConsumer
@@ -33,11 +34,20 @@ class _FakeGraph:
         return _generator()
 
 
-def _token_event(content: str) -> dict:
+def _raw_model_event(content: str) -> dict:
     return {
         'event': 'on_chat_model_stream',
         'metadata': {'langgraph_node': 'generate_direct'},
         'data': {'chunk': SimpleNamespace(content=content)},
+    }
+
+
+def _final_event(content: str) -> dict:
+    return {
+        'event': 'on_chain_end',
+        'parent_ids': ['graph-run'],
+        'metadata': {'langgraph_node': 'generate_direct'},
+        'data': {'output': {'messages': [AIMessage(content=content)]}},
     }
 
 
@@ -67,7 +77,14 @@ async def test_consumer_processes_published_message_end_to_end(unique_queue_name
     queue_name, dlq_name = unique_queue_names
     settings = get_settings()
     sink = _TokenSinkRecorder()
-    graph = _FakeGraph([_token_event('Квота'), _token_event(' составляет 2%.')])
+    graph = _FakeGraph(
+        [
+            _raw_model_event(
+                'The user is asking: internal reasoning. Rules check: allowed.'
+            ),
+            _final_event('Квота составляет 2%.'),
+        ]
+    )
     consumer = AgentRequestConsumer(
         connection_url=settings.rabbitmq.url_connect,
         queue_name=queue_name,
@@ -99,8 +116,10 @@ async def test_consumer_processes_published_message_end_to_end(unique_queue_name
         await consumer.stop()
 
     assert sink.calls == [
-        ('integration-request', {'type': 'token', 'content': 'Квота'}),
-        ('integration-request', {'type': 'token', 'content': ' составляет 2%.'}),
+        (
+            'integration-request',
+            {'type': 'token', 'content': 'Квота составляет 2%.'},
+        ),
         ('integration-request', {'type': 'done', 'used_knowledge_base': False}),
     ]
 

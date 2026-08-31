@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.api.v1.endpoints import health as health_module
-from app.clients.http_client import external_api_http_client
 from app.core.settings import get_settings
 from app.main import app, lifespan, session_bus
 from tests.fixtures.stream_ticket import create_stream_ticket
@@ -36,8 +35,8 @@ async def test_lifespan_closes_http_client_and_health_checks_have_deadlines(monk
     async def hanging_redis_ping(*_args, **_kwargs):
         await asyncio.Event().wait()
 
-    assert external_api_http_client.is_closed is False
     async with lifespan(test_app):
+        external_api_http_client = test_app.state.external_api_http_client
         assert external_api_http_client.is_closed is False
         transport = httpx.ASGITransport(app=test_app)
         async with httpx.AsyncClient(transport=transport, base_url='http://test') as client:

@@ -47,8 +47,9 @@ def configure_tracing(settings: ObservabilitySettings) -> TracerProvider:
     `LangChainInstrumentor` автоматически создаёт spans для всех вызовов
     LangChain/LangGraph внутри процесса (chat-модель, узлы графа) — не
     нужно расставлять их вручную в `app/graph/nodes/*`. Вручную остаются
-    только продуктовый root `vera.agent.request` и один логический
-    `tool.<name>` на границе MCP; доставка отдельных SSE-токенов spans не создаёт.
+    продуктовый root `vera.agent.request`, один логический `tool.<name>` на
+    границе MCP и `llm.polza.final_response` для прямого финального клиента;
+    доставка отдельных SSE-токенов spans не создаёт.
 
     Идемпотентна — повторный вызов (например в тестах) возвращает уже
     созданный `TracerProvider`, не плодит дублирующиеся

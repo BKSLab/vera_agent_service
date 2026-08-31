@@ -3,8 +3,10 @@
 """
 
 import json
+from collections.abc import Callable
 
 import httpx
+from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 
 
@@ -38,3 +40,23 @@ def stream_response(pieces: list[str]) -> httpx.Response:
     ]
     body = ''.join(f'data: {json.dumps(chunk)}\n\n' for chunk in chunks) + 'data: [DONE]\n\n'
     return httpx.Response(200, content=body.encode('utf-8'), headers={'content-type': 'text/event-stream'})
+
+
+class FakeFinalResponseGenerator:
+    """Минимальный контракт безопасного финального клиента для тестов узлов."""
+
+    def __init__(
+        self,
+        handler: Callable[[list[BaseMessage], str], str],
+    ) -> None:
+        self._handler = handler
+        self.calls: list[tuple[list[BaseMessage], str]] = []
+
+    async def generate_final_answer(
+        self,
+        messages: list[BaseMessage],
+        *,
+        node_name: str,
+    ) -> str:
+        self.calls.append((messages, node_name))
+        return self._handler(messages, node_name)

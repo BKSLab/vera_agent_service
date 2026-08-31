@@ -1,10 +1,9 @@
 class LlmApiRequestError(Exception):
-    """Финальная ошибка: все попытки нестримингованного вызова LLM
-    (`ainvoke_with_retry`, `app/clients/llm.py`) исчерпаны.
+    """Финальная ошибка: все допустимые попытки вызова LLM исчерпаны.
 
-    Пересекает границу клиента — аналог `LlmApiRequestError` из
-    `LLM_CLIENT_REFERENCE.md`, хотя механизм ретраев здесь другой
-    (обёртка над LangChain `Runnable`, не собственный HTTP-клиент).
+    Используется и LangChain-вызовами маршрутизации, и прямой безопасной
+    границей финального ответа. До consumer доходит только безопасный код
+    причины, без тела ответа провайдера и исходного exception message.
     """
 
     def __init__(self, error_details: str):

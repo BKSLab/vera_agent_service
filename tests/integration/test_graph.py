@@ -15,7 +15,8 @@ from langchain_openai import ChatOpenAI
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from app.clients.mcp_client import get_mcp_client, get_tools_with_retry
-from app.core.settings import GraphContextSettings, McpSettings
+from app.clients.polza_final_response import PolzaFinalResponseClient
+from app.core.settings import GraphContextSettings, LlmSettings, McpSettings
 from app.graph.build import build_graph
 from app.graph.policy import SIMPLIFY_ANSWER_REQUEST
 from app.messaging.consumer import AgentRequestConsumer, TurnPersistenceData
@@ -77,6 +78,10 @@ def _direct_completion(content: str) -> httpx.Response:
 
 
 def _stream_response(pieces: list[str]) -> httpx.Response:
+    structured_content = json.dumps(
+        {'answer': ''.join(pieces)},
+        ensure_ascii=False,
+    )
     chunks = [
         {
             'id': 'x',
@@ -85,7 +90,7 @@ def _stream_response(pieces: list[str]) -> httpx.Response:
             'model': 'test-model',
             'choices': [{'index': 0, 'delta': {'content': piece}, 'finish_reason': None}],
         }
-        for piece in pieces
+        for piece in [structured_content]
     ]
     body = ''.join(f'data: {json.dumps(chunk)}\n\n' for chunk in chunks) + 'data: [DONE]\n\n'
     return httpx.Response(200, content=body.encode('utf-8'), headers={'content-type': 'text/event-stream'})
@@ -168,8 +173,20 @@ def _tools_by_name(tools) -> dict:
 
 def _compile_graph(chat_model, tools, settings, context_settings=None):
     by_name = _tools_by_name(tools)
+    final_response_generator = PolzaFinalResponseClient(
+        chat_model.http_async_client,
+        LlmSettings(
+            llm_api_key='test-key',
+            llm_api_url='http://mock/v1',
+            llm_model='test-model',
+            llm_temperature=0.3,
+            llm_reasoning_effort='low',
+        ),
+        request_retries=1,
+    )
     return build_graph(
         chat_model,
+        final_response_generator,
         by_name['vera_rag_kb'],
         by_name['send_consultation_email'],
         settings,
@@ -268,9 +285,9 @@ async def test_context_budget_trims_old_turns_without_losing_current_answer():
         result = await graph.ainvoke(state)
 
         assert result['messages'][-1].content == 'Ответ на последний вопрос.'
-        # SYSTEM_PROMPT + одна сводка старых реплик + последний вопрос — вместо
-        # SYSTEM_PROMPT + 11 сообщений полной истории без бюджета.
-        assert captured['message_count'] == 3
+        # SYSTEM_PROMPT + одна сводка старых реплик + последний вопрос +
+        # финальная branch-инструкция — вместо полной истории без бюджета.
+        assert captured['message_count'] == 4
 
 
 async def test_greeting_goes_directly_to_generate_direct_without_mcp_call():
@@ -504,11 +521,9 @@ async def test_simplify_button_skips_second_intent_call_and_keeps_previous_answe
     assert SIMPLIFY_ANSWER_REQUEST in second_generation_contents
 
 
-async def test_first_token_arrives_quickly_against_mocked_llm():
-    """Ранняя проверка плотности графа (Этап 4.7) — не финальный замер TTFT
-    (провайдер и MCP настоящие только в проде, полноценный замер — Этап
-    10), только подтверждение, что архитектура (2 вызова LLM) не вносит
-    искусственных задержек на уровне самого графа."""
+async def test_buffered_final_answer_completes_quickly_against_mocked_llm():
+    """После security boundary первый SSE допустим лишь по готовности всего
+    ответа; на моках проверяем отсутствие искусственной задержки графа."""
     app = create_mock_mcp_app(chunks=[{'chunk_id': 'c1', 'text': 'квота 2%'}])
     async with run_mock_mcp_server(app) as url:
         mcp_settings = McpSettings(mcp_server_url=url, mcp_call_timeout_seconds=5.0, mcp_call_retries=1)
@@ -524,14 +539,11 @@ async def test_first_token_arrives_quickly_against_mocked_llm():
         graph = _compile_graph(chat_model, tools, mcp_settings)
 
         start = time.perf_counter()
-        first_token_at: float | None = None
-        async for event in graph.astream_events(_initial_state('Какая квота?'), version='v2'):
-            if event['event'] == 'on_chat_model_stream' and event['data']['chunk'].content:
-                first_token_at = time.perf_counter()
-                break
+        result = await graph.ainvoke(_initial_state('Какая квота?'))
+        completed_at = time.perf_counter()
 
-        assert first_token_at is not None
-        assert (first_token_at - start) < 2.0
+        assert result['messages'][-1].content == 'Квота составляет 2%.'
+        assert (completed_at - start) < 2.0
 
 
 async def test_consultation_email_follows_model_decision_without_confirmation_guard():

@@ -4,19 +4,19 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
-from langchain_openai import ChatOpenAI
 
-from app.clients.llm import astream_tokens
+from app.clients.polza_final_response import FinalResponseGenerator
 from app.core.settings import GraphContextSettings
-from app.exceptions.llm import EmptyLlmStreamError
 from app.graph.context_budget import build_bounded_messages
-from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE, contains_pseudo_tool_call
+from app.graph.output_guard import validate_plain_final_answer
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE
 from app.graph.prompts.context import NO_SEARCH_PERFORMED_INSTRUCTION
 from app.graph.prompts.system import FINAL_RESPONSE_SYSTEM_PROMPT
 from app.graph.state import AgentState
 from app.schemas.mcp_tool_results import ConsultationEmailToolResult
 
 logger = logging.getLogger('vera_agent_service')
+
 
 def _format_consultation_email_result(tool_message: ToolMessage) -> str:
     """Формирует честный ответ по проверенному MCP-результату без LLM."""
@@ -40,22 +40,39 @@ def _format_consultation_email_result(tool_message: ToolMessage) -> str:
     return 'Не удалось подтвердить результат отправки консультации. Проверьте почту.'
 
 
+def _checked_ai_message(answer: str) -> AIMessage:
+    """Не допускает небезопасный текст в state даже для кодовой email-ветки."""
+    decision = validate_plain_final_answer(answer)
+    if not decision.accepted or decision.answer is None:
+        logger.error(
+            '❌ Небезопасный ответ отклонён на границе generate_direct '
+            '(reason=%s)',
+            decision.reason,
+        )
+        answer = UNSAFE_TOOL_CALL_RESPONSE
+    return AIMessage(content=answer)
+
+
 def create_generate_direct_node(
-    chat_model: ChatOpenAI,
+    final_response_generator: FinalResponseGenerator,
     context_settings: GraphContextSettings,
 ) -> Callable[[AgentState], Coroutine[Any, Any, dict]]:
-    """Создаёт узел `generate_direct` (Этап 4.4) — стримингованный прямой
-    ответ без вызова инструмента. См. docstring
-    `create_generate_with_context_node` про механизм стриминга наружу.
+    """Создаёт узел `generate_direct` (Этап 4.4) — проверенный прямой ответ.
 
     Модели передаётся ограниченное по бюджету представление истории
-    (`context_settings`, VERA-020), не вся `state['messages']`."""
+    (`context_settings`, VERA-020), не вся `state['messages']`. Финальный
+    ответ полностью буферизуется и проходит output guard до создания
+    ``AIMessage``; сырой model stream из узла наружу не публикуется."""
 
     async def generate_direct(state: AgentState) -> dict:
         last_message = state['messages'][-1]
         if isinstance(last_message, ToolMessage):
             return {
-                'messages': [AIMessage(content=_format_consultation_email_result(last_message))],
+                'messages': [
+                    _checked_ai_message(
+                        _format_consultation_email_result(last_message)
+                    )
+                ],
             }
 
         bounded_history = build_bounded_messages(
@@ -69,19 +86,10 @@ def create_generate_direct_node(
             SystemMessage(content=NO_SEARCH_PERFORMED_INSTRUCTION),
         ]
 
-        full_text = ''
-        async for token in astream_tokens(chat_model, messages):
-            full_text += token
-
-        if not full_text:
-            raise EmptyLlmStreamError
-
-        if contains_pseudo_tool_call(full_text):
-            logger.error('Заблокирован псевдовызов инструмента в тексте финального ответа')
-            return {
-                'messages': [AIMessage(content=UNSAFE_TOOL_CALL_RESPONSE)],
-            }
-
-        return {'messages': [AIMessage(content=full_text)]}
+        answer = await final_response_generator.generate_final_answer(
+            messages,
+            node_name='generate_direct',
+        )
+        return {'messages': [_checked_ai_message(answer)]}
 
     return generate_direct

@@ -28,7 +28,8 @@ from app.exceptions.chat_turn import (
 )
 from app.exceptions.llm import EmptyLlmStreamError
 from app.exceptions.messaging import InvalidAgentRequestError
-from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE, contains_pseudo_tool_call
+from app.graph.output_guard import validate_plain_final_answer
+from app.graph.policy import UNSAFE_TOOL_CALL_RESPONSE
 from app.messaging.schemas import AgentRequestMessage
 from app.observability.request_trace import (
     AgentRequestTraceData,
@@ -89,9 +90,9 @@ MUTATING_TOOL_UNCONFIRMED_MESSAGE = (
 FINAL_RESPONSE_NODES = frozenset({'generate_direct', 'generate_with_context'})
 """Только эти узлы формируют пользовательский ответ.
 
-`analyze_intent` тоже вызывает chat-модель и может породить
-`on_chat_model_stream`, но его текст является внутренним результатом маршрутизации
-и не должен попадать в SSE.
+`analyze_intent` вызывает chat-модель и может породить `on_chat_model_stream`,
+но consumer игнорирует все такие события. Пользовательский текст читается
+только из завершённого snapshot одного из этих узлов или корня графа.
 """
 
 TokenSink = Callable[[str, dict], Awaitable[None]]
@@ -460,11 +461,29 @@ class AgentRequestConsumer:
         (VERA-034). Успехом считается только `completed`.
         """
         if persistence_start.status == STATUS_COMPLETED:
-            answer = persistence_start.answer or ''
-            if answer:
-                await self._token_sink(
-                    delivery.request_id, {'type': 'token', 'content': answer}
+            decision = validate_plain_final_answer(persistence_start.answer)
+            if decision.accepted and decision.answer is not None:
+                answer = decision.answer
+                trace_data.output_guard_status = 'accepted'
+            else:
+                answer = UNSAFE_TOOL_CALL_RESPONSE
+                trace_data.output_guard_status = 'blocked'
+                logger.error(
+                    '❌ Небезопасный сохранённый ответ не воспроизведён '
+                    '(request_id=%s, reason=%s)',
+                    delivery.request_id,
+                    decision.reason,
                 )
+            trace_data.output_guard_reason = decision.reason
+            trace_data.output_guard_raw_char_count = (
+                len(persistence_start.answer)
+                if isinstance(persistence_start.answer, str)
+                else 0
+            )
+            trace_data.output_guard_final_char_count = len(answer)
+            await self._token_sink(
+                delivery.request_id, {'type': 'token', 'content': answer}
+            )
             await delivery.send_terminal(
                 {
                     'type': 'done',
@@ -472,8 +491,8 @@ class AgentRequestConsumer:
                 }
             )
             trace_data.outcome = 'done'
-            trace_data.streaming_started = bool(answer)
-            trace_data.response_chunk_count = 1 if answer else 0
+            trace_data.streaming_started = True
+            trace_data.response_chunk_count = 1
             trace_data.response_char_count = len(answer)
             self._set_content(
                 span,
@@ -590,12 +609,11 @@ class AgentRequestConsumer:
                 partial_answer = ''.join(response_chunks) or None
 
                 if isinstance(error, EmptyLlmStreamError) and not trace_data.mutating_tool_called:
-                    # ``astream_tokens`` уже сделал bounded retries самой
-                    # финальной LLM-операции. Повтор всего графа здесь только
-                    # добавлял бы пустые AIMessage в checkpoint и повторял бы
+                    # Финальный клиент уже сделал bounded request/output
+                    # retries. Повтор всего графа здесь только повторял бы
                     # поиск/маршрутизацию без пользы.
                     logger.error(
-                        '❌ LLM завершила финальный поток без видимого текста '
+                        '❌ Финальная LLM-генерация завершилась без проверенного ответа '
                         '(session_id=%s, request_id=%s)',
                         payload.session_id,
                         payload.request_id,
@@ -746,6 +764,20 @@ class AgentRequestConsumer:
         span.set_attribute('agent.mcp.retry_count', trace_data.mcp_retry_count)
         span.set_attribute('agent.response.chunk_count', trace_data.response_chunk_count)
         span.set_attribute('agent.response.char_count', trace_data.response_char_count)
+        span.set_attribute('vera.llm.output_guard.status', trace_data.output_guard_status)
+        span.set_attribute('vera.llm.output_guard.reason', trace_data.output_guard_reason)
+        span.set_attribute(
+            'vera.llm.output_guard.retry_count',
+            trace_data.output_guard_retry_count,
+        )
+        span.set_attribute(
+            'vera.llm.output_guard.raw_char_count',
+            trace_data.output_guard_raw_char_count,
+        )
+        span.set_attribute(
+            'vera.llm.output_guard.final_char_count',
+            trace_data.output_guard_final_char_count,
+        )
         span.set_attribute('agent.streaming.started', trace_data.streaming_started)
         span.set_attribute(
             'agent.mutating_tool.called',
@@ -916,23 +948,45 @@ class AgentRequestConsumer:
                 checkpoint_values.get('messages'),
             )
         initial_state = _initial_state(payload, pii_context)
-        streamed_content = False
         deferred_answer: str | None = None
-        blocked_pseudo_output = False
         async for event in self._graph.astream_events(
             initial_state,
             config=config,
             version='v2',
         ):
+            if not isinstance(event, Mapping):
+                logger.warning(
+                    '⚠️ Некорректное событие графа пропущено '
+                    '(event_type=%s)',
+                    type(event).__name__,
+                )
+                continue
+            # Сырой model stream принципиально не является пользовательским
+            # транспортом. Финальный Polza-клиент сначала буферизует и
+            # проверяет весь ответ; consumer читает только AIMessage из
+            # завершённого node/root snapshot.
+            if event.get('event') == 'on_chat_model_stream':
+                continue
+
             # Node-level outputs повторяют `tool_calls`/`retrieved_chunks`.
             # Единственный authoritative snapshot — корневой graph output.
             event_is_chain_end = event.get('event') == 'on_chain_end'
-            event_node = event.get('metadata', {}).get('langgraph_node') or event.get('name')
+            metadata = event.get('metadata')
+            event_node = (
+                metadata.get('langgraph_node')
+                if isinstance(metadata, Mapping)
+                else None
+            ) or event.get('name')
             event_is_root = event_is_chain_end and not event.get('parent_ids')
-            event_is_final_node = event_is_chain_end and event_node in FINAL_RESPONSE_NODES
+            event_is_final_node = (
+                event_is_chain_end
+                and isinstance(event_node, str)
+                and event_node in FINAL_RESPONSE_NODES
+            )
             if event_is_root or event_is_final_node:
-                output = event.get('data', {}).get('output')
-                if isinstance(output, dict):
+                data = event.get('data')
+                output = data.get('output') if isinstance(data, Mapping) else None
+                if isinstance(output, Mapping):
                     if event_is_root:
                         sources = output.get('retrieved_chunks')
                         if isinstance(sources, list):
@@ -946,13 +1000,11 @@ class AgentRequestConsumer:
                                     if isinstance(tool_name, str)
                                 )
                             )
-                    # Детерминированный результат email-тулы формируется
-                    # AIMessage без model-stream события. Не
-                    # считать их пустым ответом: отложим текст до завершения
-                    # графа и отправим его как один SSE-token. В production
-                    # LangGraph иногда маркирует final-node event parent_ids;
-                    # поэтому учитываем и сам final node, а не только root.
-                    if not streamed_content and (event_is_root or event_is_final_node):
+                    # В production LangGraph иногда маркирует final-node
+                    # event parent_ids; поэтому учитываем и сам final node,
+                    # а не только root. Отправка всё равно произойдёт лишь
+                    # после полного завершения графа.
+                    if event_is_root or event_is_final_node:
                         messages = output.get('messages')
                         if isinstance(messages, list):
                             for message in reversed(messages):
@@ -964,35 +1016,27 @@ class AgentRequestConsumer:
                                     break
                                 if not isinstance(message, AIMessage):
                                     continue
-                                content = message.content
-                                if isinstance(content, str) and content:
-                                    if contains_pseudo_tool_call(content):
-                                        logger.error(
-                                            'Заблокирован псевдовызов инструмента в финальном сообщении'
-                                        )
-                                    else:
-                                        deferred_answer = content
+                                decision = validate_plain_final_answer(
+                                    message.content
+                                )
+                                if not decision.accepted or decision.answer is None:
+                                    deferred_answer = None
+                                    logger.error(
+                                        '❌ Небезопасное финальное AIMessage отклонено consumer '
+                                        '(reason=%s)',
+                                        decision.reason,
+                                    )
+                                else:
+                                    deferred_answer = decision.answer
                                 break
-            if event.get('event') != 'on_chat_model_stream':
-                continue
-            if event.get('metadata', {}).get('langgraph_node') not in FINAL_RESPONSE_NODES:
-                continue
-            content = event['data']['chunk'].content
-            if not isinstance(content, str) or not content.strip():
-                continue
-            if contains_pseudo_tool_call(content):
-                blocked_pseudo_output = True
-                logger.error('Заблокирован псевдовызов инструмента в SSE-потоке')
-                continue
-            streamed_content = True
-            yield content
-        if not streamed_content and deferred_answer:
+        if deferred_answer:
+            logger.info(
+                '✅ Проверенный финальный ответ передан в SSE '
+                '(request_id=%s, chars=%d)',
+                payload.request_id,
+                len(deferred_answer),
+            )
             yield deferred_answer
-        elif not streamed_content and blocked_pseudo_output:
-            # Даже если конкретная версия LangGraph не прислала финальный
-            # snapshot, клиент не должен получить пустую реплику после
-            # фильтрации служебного текста.
-            yield UNSAFE_TOOL_CALL_RESPONSE
 
     async def _load_checkpoint_values(self, config: dict) -> Mapping:
         """Читает состояние сессии; тестовый граф может быть без checkpointer."""
